@@ -51,6 +51,7 @@ const CMD_ALL_VALUES = 0x08;
 // SysEx commands: Move -> Live
 const CMD_HELLO = 0x10;
 const CMD_LEARN_KNOB = 0x13;
+const CMD_KNOB_VALUE = 0x14;  // Move -> Live: knob_idx, value (0-127)
 const CMD_REQUEST_STATE = 0x15;
 const CMD_UNMAP_KNOB = 0x16;
 
@@ -361,10 +362,12 @@ function handleInternalCC(cc, value) {
 }
 
 function handleKnobTurn(idx, rawValue) {
+    console.log(`[DC] knobTurn idx=${idx} raw=${rawValue} connected=${connected} learn=${learnMode}`);
     if (!connected) return;
 
     if (learnMode) {
         // In learn mode, twist a knob to bind it
+        console.log(`[DC] LEARN: sending LEARN_KNOB for knob ${idx}`);
         sendCommand(CMD_LEARN_KNOB, [idx]);
         return;
     }
@@ -374,8 +377,8 @@ function handleKnobTurn(idx, rawValue) {
     const delta = decodeAcceleratedDelta(rawValue, idx);
     paramValues[idx] = Math.max(0, Math.min(127, paramValues[idx] + delta));
 
-    // Send absolute value to Ableton
-    sendCC(KNOB_CCS[idx], paramValues[idx]);
+    // Send absolute value to Ableton via SysEx (CC doesn't pass through Standalone Port)
+    sendCommand(CMD_KNOB_VALUE, [idx, paramValues[idx]]);
     needsRedraw = true;
 }
 

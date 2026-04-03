@@ -43,7 +43,7 @@ CMD_HELLO = 0x10
 CMD_LEARN_START = 0x11
 CMD_LEARN_STOP = 0x12
 CMD_LEARN_KNOB = 0x13
-CMD_SELECT_DEVICE = 0x14
+CMD_KNOB_VALUE = 0x14   # Move -> Live: knob_idx, value (0-127)
 CMD_REQUEST_STATE = 0x15
 CMD_UNMAP_KNOB = 0x16
 
@@ -168,6 +168,9 @@ class SchwungDeviceControl(ControlSurface):
         if len(midi_bytes) < 1:
             return
 
+        self.log_message('SchwungDeviceControl RX: {}'.format(
+            ' '.join('{:02X}'.format(b) for b in midi_bytes)))
+
         # SysEx
         if midi_bytes[0] == SYSEX_START:
             self._process_sysex(midi_bytes)
@@ -191,13 +194,18 @@ class SchwungDeviceControl(ControlSurface):
         super(SchwungDeviceControl, self).receive_midi(midi_bytes)
 
     def _process_sysex(self, midi_bytes):
+        self.log_message('SchwungDeviceControl SYSEX len={}: {}'.format(
+            len(midi_bytes), ' '.join('{:02X}'.format(b) for b in midi_bytes[:12])))
         if len(midi_bytes) < 6:
+            self.log_message('SchwungDeviceControl SYSEX too short')
             return
         if tuple(midi_bytes[0:4]) != SYSEX_HEADER:
+            self.log_message('SchwungDeviceControl SYSEX header mismatch')
             return
 
         cmd = midi_bytes[4]
         data = midi_bytes[5:-1]  # strip F7
+        self.log_message('SchwungDeviceControl SYSEX cmd=0x{:02X} data={}'.format(cmd, list(data)))
 
         if cmd == CMD_HELLO:
             self._on_hello()
@@ -210,6 +218,9 @@ class SchwungDeviceControl(ControlSurface):
         elif cmd == CMD_LEARN_KNOB:
             if len(data) >= 1:
                 self._learn_knob(data[0])
+        elif cmd == CMD_KNOB_VALUE:
+            if len(data) >= 2:
+                self._handle_knob_value(data[0], data[1])
         elif cmd == CMD_SELECT_DEVICE:
             if len(data) >= 1:
                 self._select_device_by_index(data[0])
@@ -220,12 +231,13 @@ class SchwungDeviceControl(ControlSurface):
                 self._unmap_knob(data[0])
 
     # =========================================================================
-    # Knob CC handling (Move -> Live parameter changes)
+    # Knob value handling (Move -> Live parameter changes)
     # =========================================================================
 
-    def _handle_knob_cc(self, cc, value):
-        idx = KNOB_CCS.index(cc)
-        param = self._active_params[idx]
+    def _handle_knob_value(self, knob_idx, value):
+        if knob_idx < 0 or knob_idx >= 8:
+            return
+        param = self._active_params[knob_idx]
         if param is None:
             return
 
@@ -234,12 +246,12 @@ class SchwungDeviceControl(ControlSurface):
         new_value = param.min + normalized * (param.max - param.min)
 
         # Suppress feedback to avoid echo loop
-        self._suppressing_feedback[idx] = True
+        self._suppressing_feedback[knob_idx] = True
         try:
             param.value = new_value
         except:
             pass
-        self._suppressing_feedback[idx] = False
+        self._suppressing_feedback[knob_idx] = False
 
     # =========================================================================
     # Navigation CC handling
@@ -298,14 +310,16 @@ class SchwungDeviceControl(ControlSurface):
     # =========================================================================
 
     def _learn_knob(self, knob_idx):
-        if not self._learn_mode:
-            return
+        self.log_message('SchwungDeviceControl: _learn_knob({})'.format(knob_idx))
         if knob_idx < 0 or knob_idx >= 8:
             return
 
         # Get the currently selected/focused parameter in Live
         param = self.song().view.selected_parameter
         device = self._get_selected_device()
+        self.log_message('SchwungDeviceControl: param={} device={}'.format(
+            param.name if param else None,
+            device.name if device else None))
 
         if param is None or device is None:
             self.log_message('SchwungDeviceControl: learn failed - no param or device selected')
