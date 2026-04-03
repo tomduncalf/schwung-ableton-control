@@ -263,10 +263,23 @@ function handleSysEx(msg) {
             needsRedraw = true;
             break;
 
+        case CMD_KNOB_VALUE:
+            // Single knob value update from Ableton
+            if (payload.length >= 2) {
+                const ki = payload[0];
+                if (ki >= 0 && ki < 8) {
+                    paramValues[ki] = payload[1];
+                    enqueueLED('button', KNOB_CCS[ki], valueToKnobColor(paramValues[ki], learnMode));
+                    needsRedraw = true;
+                }
+            }
+            break;
+
         case CMD_ALL_VALUES:
             for (let i = 0; i < Math.min(8, payload.length); i++) {
                 paramValues[i] = payload[i];
             }
+            updateKnobLEDs();
             needsRedraw = true;
             break;
     }
@@ -372,13 +385,17 @@ function handleKnobTurn(idx, rawValue) {
         return;
     }
 
-    // Relative to absolute conversion
-    // Move sends relative: 1-63 = CW, 65-127 = CCW
-    const delta = decodeAcceleratedDelta(rawValue, idx);
+    const rawDelta = decodeAcceleratedDelta(rawValue, idx);
+    const delta = Math.round(rawDelta * 0.2) || (rawDelta > 0 ? 1 : rawDelta < 0 ? -1 : 0);
     paramValues[idx] = Math.max(0, Math.min(127, paramValues[idx] + delta));
 
     // Send absolute value to Ableton via SysEx (CC doesn't pass through Standalone Port)
     sendCommand(CMD_KNOB_VALUE, [idx, paramValues[idx]]);
+
+    // Update this knob's LED immediately
+    const colour = valueToKnobColor(paramValues[idx], learnMode);
+    enqueueLED('button', KNOB_CCS[idx], colour);
+
     needsRedraw = true;
 }
 
@@ -531,15 +548,21 @@ function initLEDs() {
     ledsInitialized = true;
 }
 
+// Color sweep from dim to bright for knob value display
+const knobColorSweep = [Black, 117, 124, 119, 123, 118, 121, 122, White];
+const learnColorSweep = [Black, 5, 5, 5, 5, 5, 5, 5, Cyan]; // cyan sweep
+
+function valueToKnobColor(value, isLearn) {
+    const sweep = isLearn ? learnColorSweep : knobColorSweep;
+    const level = Math.min(value, 127) / 127;
+    const index = Math.round(level * (sweep.length - 1));
+    return sweep[index];
+}
+
 function updateKnobLEDs() {
     for (let i = 0; i < 8; i++) {
         if (paramNames[i]) {
-            // Color based on value - green intensity
-            const value = paramValues[i];
-            let colour = Black;
-            if (value > 0) {
-                colour = learnMode ? Cyan : BrightGreen;
-            }
+            const colour = valueToKnobColor(paramValues[i], learnMode);
             enqueueLED('button', KNOB_CCS[i], colour);
         } else {
             enqueueLED('button', KNOB_CCS[i], Black);

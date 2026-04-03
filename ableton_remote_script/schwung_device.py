@@ -414,7 +414,7 @@ class SchwungDeviceControl(ControlSurface):
     def _send_param_value(self, knob_idx):
         param = self._active_params[knob_idx]
         if param is None:
-            self._send_cc(KNOB_CCS[knob_idx], 0)
+            self._send_sysex(CMD_KNOB_VALUE, [knob_idx, 0])
             return
         val_range = param.max - param.min
         if val_range == 0:
@@ -422,7 +422,7 @@ class SchwungDeviceControl(ControlSurface):
         else:
             midi_val = int(127 * (param.value - param.min) / val_range)
         midi_val = max(0, min(127, midi_val))
-        self._send_cc(KNOB_CCS[knob_idx], midi_val)
+        self._send_sysex(CMD_KNOB_VALUE, [knob_idx, midi_val])
 
     # =========================================================================
     # Apply bindings for current device
