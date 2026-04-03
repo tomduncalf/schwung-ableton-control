@@ -135,7 +135,6 @@ function sendSysEx(data) {
 
 function sendCommand(cmd, dataBytes) {
     const msg = [...SYSEX_HEADER, cmd, ...dataBytes, 0xF7];
-    console.log(`[DC] sendCommand cmd=0x${cmd.toString(16)} data=[${dataBytes}] full=[${msg.map(b => '0x'+b.toString(16)).join(',')}]`);
     sendSysEx(msg);
 }
 
@@ -146,7 +145,6 @@ function sendCC(cc, value) {
         cc,
         value
     ];
-    console.log(`[DC] sendCC cc=${cc} val=${value} packet=[${packet.map(b => '0x'+b.toString(16)).join(',')}]`);
     move_midi_external_send(packet);
 }
 
@@ -159,8 +157,6 @@ let sysexBuffer = null;
 
 function processMidiExternal(data) {
     if (!data || data.length < 1) return;
-    console.log(`[DC] MIDI EXT received: [${Array.from(data).map(b => '0x'+b.toString(16)).join(',')}]`);
-
     const status = data[0] & 0xF0;
 
     // SysEx start
@@ -198,17 +194,14 @@ function processMidiExternal(data) {
 function handleSysEx(msg) {
     // Validate header: F0 00 7D 01 <cmd> ... F7
     if (msg.length < 6) {
-        console.log(`[DC] SysEx too short: ${msg.length}`);
         return;
     }
     if (msg[0] !== 0xF0 || msg[1] !== 0x00 || msg[2] !== 0x7D || msg[3] !== 0x01) {
-        console.log(`[DC] SysEx header mismatch: [${msg.slice(0,4).map(b=>'0x'+b.toString(16)).join(',')}]`);
         return;
     }
 
     const cmd = msg[4];
     const payload = msg.slice(5, -1); // strip F7
-    console.log(`[DC] SysEx parsed: cmd=0x${cmd.toString(16)} payload=[${payload}]`);
 
     switch (cmd) {
         case CMD_DEVICE_INFO:
@@ -229,6 +222,7 @@ function handleSysEx(msg) {
         case CMD_DEVICE_COUNT:
             if (payload.length >= 1) {
                 deviceCount = payload[0];
+                updateNavLEDs();
                 needsRedraw = true;
             }
             break;
@@ -236,6 +230,7 @@ function handleSysEx(msg) {
         case CMD_DEVICE_INDEX:
             if (payload.length >= 1) {
                 deviceIndex = payload[0];
+                updateNavLEDs();
                 needsRedraw = true;
             }
             break;
@@ -261,7 +256,6 @@ function handleSysEx(msg) {
         case CMD_HEARTBEAT:
             connected = true;
             heartbeatTimer = 0;
-            console.log(`[DC] HEARTBEAT: timer reset to ${heartbeatTimer}, connected=${connected}`);
             needsRedraw = true;
             break;
 
@@ -379,12 +373,10 @@ function handleInternalCC(cc, value) {
 }
 
 function handleKnobTurn(idx, rawValue) {
-    console.log(`[DC] knobTurn idx=${idx} raw=${rawValue} connected=${connected} learn=${learnMode}`);
     if (!connected) return;
 
     if (learnMode) {
         // In learn mode, twist a knob to bind it
-        console.log(`[DC] LEARN: sending LEARN_KNOB for knob ${idx}`);
         sendCommand(CMD_LEARN_KNOB, [idx]);
         return;
     }
@@ -544,8 +536,16 @@ function drawFooter() {
  * LED Control
  * ============================================================================ */
 
-function enqueueLED(type, id, colour) {
-    ledQueue.push({ type, id, colour });
+function enqueueLED(type, id, colour, force = false) {
+    // Replace existing entry for same LED to avoid queue buildup
+    for (let i = 0; i < ledQueue.length; i++) {
+        if (ledQueue[i].type === type && ledQueue[i].id === id) {
+            ledQueue[i].colour = colour;
+            ledQueue[i].force = force || ledQueue[i].force;
+            return;
+        }
+    }
+    ledQueue.push({ type, id, colour, force });
 }
 
 function flushLEDQueue() {
@@ -553,9 +553,9 @@ function flushLEDQueue() {
     for (let i = 0; i < count; i++) {
         const msg = ledQueue.shift();
         if (msg.type === 'pad') {
-            setLED(msg.id, msg.colour);
+            setLED(msg.id, msg.colour, msg.force);
         } else {
-            setButtonLED(msg.id, msg.colour);
+            setButtonLED(msg.id, msg.colour, msg.force);
         }
     }
 }
@@ -568,12 +568,18 @@ function initLEDs() {
     // Nav button LEDs
     enqueueLED('button', MoveMenu, WhiteLedBright);
     enqueueLED('button', MoveBack, WhiteLedBright);
-    enqueueLED('button', MoveLeft, WhiteLedBright);
-    enqueueLED('button', MoveRight, WhiteLedBright);
     enqueueLED('button', MoveUp, DarkGrey);
     enqueueLED('button', MoveDown, DarkGrey);
+    updateNavLEDs();
     ledsInitialized = true;
 }
+
+function updateNavLEDs() {
+    const hasNav = deviceCount > 1;
+    enqueueLED('button', MoveLeft, hasNav ? WhiteLedBright : Black, true);
+    enqueueLED('button', MoveRight, hasNav ? WhiteLedBright : Black, true);
+}
+
 
 // Color sweep from dim to bright for knob value display
 const knobColorSweep = [Black, 117, 124, 119, 123, 118, 121, 122, White];
@@ -609,12 +615,8 @@ function init() {
     drawScreen();
 
     // Say hello to Ableton
-    console.log('[DC] Module initialized, sending HELLO');
+    console.log('[DC] Module initialized');
     sendCommand(CMD_HELLO, []);
-
-    // Also send a plain CC as a simpler test
-    console.log('[DC] Sending test CC on ch16');
-    sendCC(127, 42);
 }
 
 function tick() {
@@ -622,11 +624,7 @@ function tick() {
 
     // Heartbeat watchdog
     heartbeatTimer++;
-    if (tickCount % 60 === 0) {
-        console.log(`[DC] TICK heartbeatTimer=${heartbeatTimer} connected=${connected}`);
-    }
     if (heartbeatTimer > HEARTBEAT_TIMEOUT_TICKS && connected) {
-        console.log(`[DC] WATCHDOG: disconnecting after ${heartbeatTimer} ticks`);
         connected = false;
         needsRedraw = true;
     }
