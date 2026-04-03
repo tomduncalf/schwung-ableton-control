@@ -57,3 +57,11 @@ grep -i schwung ~/Library/Preferences/Ableton/Live\ */Log.txt | tail -20
 ```
 
 Module logs are prefixed `[DC]`.
+
+## Quick Deploy
+
+After any change to `src/ui.js` or `src/module.json`, deploy to Move with:
+```bash
+./scripts/build.sh && ./scripts/install.sh && ssh root@move.local "/etc/init.d/move stop && /etc/init.d/move start"
+```
+Always run this after editing Move-side code.

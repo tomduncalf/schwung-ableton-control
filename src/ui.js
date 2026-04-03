@@ -69,6 +69,7 @@ let learnMode = false;
 let shiftHeld = false;
 let needsRedraw = true;
 let tickCount = 0;
+let touchedKnob = -1; // -1 = none, 0-7 = knob index
 
 // Device state (from Ableton)
 let deviceName = '';
@@ -318,6 +319,8 @@ function handleMidiInternal(data) {
         handleInternalCC(d1, d2);
     } else if (status === 0x90 && d2 > 0) {
         handleInternalNoteOn(d1, d2);
+    } else if ((status === 0x80) || (status === 0x90 && d2 === 0)) {
+        handleInternalNoteOff(d1);
     }
 }
 
@@ -400,11 +403,19 @@ function handleKnobTurn(idx, rawValue) {
 }
 
 function handleInternalNoteOn(note, velocity) {
-    // Capacitive knob touch (notes 0-8) - ignore
-    if (note <= 8) return;
+    // Capacitive knob touch (notes 0-7)
+    if (note < 8) {
+        touchedKnob = note;
+        needsRedraw = true;
+        return;
+    }
+}
 
-    // Step buttons (notes 16-31) - could use for device quick-select
-    // For now, unused
+function handleInternalNoteOff(note) {
+    if (note < 8 && touchedKnob === note) {
+        touchedKnob = -1;
+        needsRedraw = true;
+    }
 }
 
 /* ============================================================================
@@ -464,11 +475,17 @@ function drawParams() {
 
         const name = paramNames[i] || '';
         const value = paramValues[i];
+        const touched = (touchedKnob === i);
+
+        if (touched && name) {
+            // Inverted: white background, black text
+            fill_rect(x, y - 1, colWidth, rowHeight, 1);
+        }
 
         if (name) {
-            // Truncate name to fit
+            const fg = touched ? 0 : 1;
             let displayName = name.length > 8 ? name.substring(0, 7) + '.' : name;
-            print(x + 1, y, displayName, 1, 'small');
+            print(x + 1, y, displayName, fg, 'small');
 
             // Value bar
             const barX = x + 44;
@@ -477,11 +494,20 @@ function drawParams() {
             const barY = y + 1;
             const fillW = Math.round((value / 127) * barW);
 
-            // Bar outline
-            draw_rect(barX, barY, barW, barH, 1);
-            // Bar fill
-            if (fillW > 0) {
-                fill_rect(barX, barY, fillW, barH, 1);
+            // When touched: outline black, empty part black, filled part white (visible)
+            // When normal: outline white, filled part white
+            draw_rect(barX, barY, barW, barH, fg);
+            if (touched) {
+                // Clear the bar area to black first, then draw fill in white
+                fill_rect(barX, barY, barW, barH, 0);
+                if (fillW > 0) {
+                    fill_rect(barX, barY, fillW, barH, 1);
+                }
+                draw_rect(barX, barY, barW, barH, 0);
+            } else {
+                if (fillW > 0) {
+                    fill_rect(barX, barY, fillW, barH, 1);
+                }
             }
         }
     }
