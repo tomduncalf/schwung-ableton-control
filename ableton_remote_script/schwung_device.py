@@ -46,6 +46,7 @@ CMD_LEARN_KNOB = 0x13
 CMD_KNOB_VALUE = 0x14   # Move -> Live: knob_idx, value (0-127)
 CMD_REQUEST_STATE = 0x15
 CMD_UNMAP_KNOB = 0x16
+CMD_NAV_DEVICE = 0x17   # Move -> Live: 0x00=left, 0x01=right
 
 # Persistence
 BINDINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bindings.json')
@@ -221,14 +222,15 @@ class SchwungDeviceControl(ControlSurface):
         elif cmd == CMD_KNOB_VALUE:
             if len(data) >= 2:
                 self._handle_knob_value(data[0], data[1])
-        elif cmd == CMD_SELECT_DEVICE:
-            if len(data) >= 1:
-                self._select_device_by_index(data[0])
         elif cmd == CMD_REQUEST_STATE:
             self._send_full_state()
         elif cmd == CMD_UNMAP_KNOB:
             if len(data) >= 1:
                 self._unmap_knob(data[0])
+        elif cmd == CMD_NAV_DEVICE:
+            if len(data) >= 1:
+                direction = 1 if data[0] == 0x01 else -1
+                self._navigate_device(direction)
 
     # =========================================================================
     # Knob value handling (Move -> Live parameter changes)
@@ -290,10 +292,7 @@ class SchwungDeviceControl(ControlSurface):
         device = self._device_list[self._device_index]
 
         # Select the device in Live
-        track = self.song().view.selected_track
-        if track:
-            track.view.select_instrument = False
-            self.song().view.selected_track.view.selected_device = device
+        self.song().view.select_device(device)
 
     def _navigate_bank(self, direction):
         new_bank = self._bank_index + direction

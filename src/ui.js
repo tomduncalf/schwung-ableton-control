@@ -52,6 +52,7 @@ const CMD_ALL_VALUES = 0x08;
 const CMD_HELLO = 0x10;
 const CMD_LEARN_KNOB = 0x13;
 const CMD_KNOB_VALUE = 0x14;  // Move -> Live: knob_idx, value (0-127)
+const CMD_NAV_DEVICE = 0x17;  // Move -> Live: direction (-1 or +1 as 0x00/0x01)
 const CMD_REQUEST_STATE = 0x15;
 const CMD_UNMAP_KNOB = 0x16;
 
@@ -353,11 +354,11 @@ function handleInternalCC(cc, value) {
 
     // Arrow keys - device/bank navigation
     if (cc === MoveLeft && value > 63) {
-        sendCC(CC_DEVICE_LEFT, 127);
+        sendCommand(CMD_NAV_DEVICE, [0x00]); // left = -1
         return;
     }
     if (cc === MoveRight && value > 63) {
-        sendCC(CC_DEVICE_RIGHT, 127);
+        sendCommand(CMD_NAV_DEVICE, [0x01]); // right = +1
         return;
     }
     if (cc === MoveUp && value > 63) {

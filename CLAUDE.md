@@ -65,3 +65,9 @@ After any change to `src/ui.js` or `src/module.json`, deploy to Move with:
 ./scripts/build.sh && ./scripts/install.sh && ssh root@move.local "/etc/init.d/move stop && /etc/init.d/move start"
 ```
 Always run this after editing Move-side code.
+
+After any change to `ableton_remote_script/`, deploy to Ableton with:
+```bash
+rm -rf /Users/td/Production/Ableton/User\ Library/Remote\ Scripts/SchwungDeviceControl/ && cp -R ./ableton_remote_script /Users/td/Production/Ableton/User\ Library/Remote\ Scripts/SchwungDeviceControl
+```
+Then restart Ableton.
