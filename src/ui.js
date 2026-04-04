@@ -91,6 +91,8 @@ const CMD_DEVICE_LIST_REQUEST = 0x1c; // Move -> Live: offset (request 8 device 
 const CMD_DEVICE_SELECT = 0x1d;       // Move -> Live: device_index (select by flat index)
 const CMD_FAV_ADD = 0x1e;             // Move -> Live: fav_index (0/1), knob_idx
 const CMD_FAV_ADD_ACK = 0x0f;         // Live -> Move: fav_index, result (0=ok, 1=full, 2=no binding)
+const CMD_SET_ADD = 0x1f;             // Move -> Live: set_index (0/1), knob_idx
+const CMD_SET_ADD_ACK = 0x20;         // Live -> Move: set_index, result (0=ok, 1=full, 2=no binding)
 
 // Timing
 const HEARTBEAT_TIMEOUT_TICKS = 720; // ~3 seconds at ~240fps (tick rate is faster than expected)
@@ -141,9 +143,17 @@ let favUsedAsModifier = false; // true if knob tapped during fav hold
 let favFeedbackTimer = 0;
 let favFeedbackText = "";
 
+// Set page state (per-set cross-device favourites, slot 9)
+let setState = 0;              // 0=empty, 1=has bindings, 2=active
+let setSubCount = 0;
+let setActiveSub = 0;
+let setHeld = -1;              // which set button is held (-1/0/1)
+let setUsedAsModifier = false;
+
 // Step button notes (step 1-8 = notes 16-23)
 const STEP_NOTE_BASE = 16;
 const FAV_STEP_NOTE_BASE = 24; // step 9-10 = notes 24-25
+const SET_STEP_NOTE_BASE = 28; // step 13-14 = notes 28-29
 
 // Value overlay state
 let overlayKnob = -1; // which knob's overlay is showing (-1 = none)
@@ -324,12 +334,18 @@ function handleSysEx(msg) {
           favSubCount = Math.max(0, payload[3] - 1);
           favActiveSub = Math.max(0, payload[4] - 1);
         }
+        if (payload.length >= 8) {
+          setState = Math.max(0, payload[5] - 1);
+          setSubCount = Math.max(0, payload[6] - 1);
+          setActiveSub = Math.max(0, payload[7] - 1);
+        }
         updateStepLEDs();
         needsRedraw = true;
       }
       break;
 
     case CMD_FAV_ADD_ACK:
+    case CMD_SET_ADD_ACK:
       if (payload.length >= 2) {
         const result = payload[1];
         if (result === 0) favFeedbackText = "Added";
@@ -535,6 +551,8 @@ function handleInternalCC(cc, value) {
     }
     padLed(FAV_STEP_NOTE_BASE, Black);
     padLed(FAV_STEP_NOTE_BASE + 1, Black);
+    padLed(SET_STEP_NOTE_BASE, Black);
+    padLed(SET_STEP_NOTE_BASE + 1, Black);
     host_exit_module();
     return;
   }
@@ -644,6 +662,15 @@ function handleInternalNoteOn(note, velocity) {
       needsRedraw = true;
       return;
     }
+    // Set held + touch = add binding to set page
+    if (setHeld >= 0 && connected && paramNames[note]) {
+      sendCommand(CMD_SET_ADD, [setHeld, note]);
+      setUsedAsModifier = true;
+      overlayKnob = note;
+      overlayTimer = OVERLAY_HOLD_TICKS;
+      needsRedraw = true;
+      return;
+    }
     // Delete held + touch = unmap knob
     if (deleteHeld && !learnMode && connected && paramNames[note]) {
       sendCommand(CMD_UNMAP_KNOB, [note]);
@@ -694,6 +721,13 @@ function handleInternalNoteOn(note, velocity) {
     favUsedAsModifier = false;
     return;
   }
+
+  // Set step buttons 13-14 (notes 28-29)
+  if (note >= SET_STEP_NOTE_BASE && note < SET_STEP_NOTE_BASE + 2) {
+    setHeld = note - SET_STEP_NOTE_BASE;
+    setUsedAsModifier = false;
+    return;
+  }
 }
 
 function handleInternalNoteOff(note) {
@@ -732,6 +766,17 @@ function handleInternalNoteOff(note) {
     }
     favHeld = -1;
     favUsedAsModifier = false;
+    return;
+  }
+
+  // Set step button release (notes 28-29)
+  if (note >= SET_STEP_NOTE_BASE && note < SET_STEP_NOTE_BASE + 2) {
+    const si = note - SET_STEP_NOTE_BASE;
+    if (si === setHeld && !setUsedAsModifier) {
+      sendCommand(CMD_PAGE_CHANGE, [10 + si]);
+    }
+    setHeld = -1;
+    setUsedAsModifier = false;
     return;
   }
 }
@@ -1015,34 +1060,55 @@ function drawPageTabs() {
 }
 
 function drawFooter() {
-  // Single fav tab with subpage indicator
-  const favTabW = 19;
-  const favTabY = 54;
-  const favTabH = 9;
-  const favLabel = favSubCount > 0 ? `* ${favActiveSub + 1}` : "*";
+  const tabW = 19;
+  const tabY = 54;
+  const tabH = 9;
+  const tabGap = 1;
+  let tabX = 0;
+
+  // Fav tab
+  const favLabel = `* ${favActiveSub + 1}`;
   if (currentPage === 8) {
-    fill_rect(0, favTabY, favTabW, favTabH, 1);
-    print(1, favTabY + 1, favLabel, 0);
+    fill_rect(tabX, tabY, tabW, tabH, 1);
+    print(tabX + 1, tabY + 1, favLabel, 0);
   } else if (favState >= 1) {
-    print(1, favTabY + 1, favLabel, 1);
+    print(tabX + 1, tabY + 1, favLabel, 1);
   } else {
-    print(1, favTabY + 1, favLabel, 1);
+    print(tabX + 1, tabY + 1, favLabel, 1);
   }
-  // Subpage indicator under fav tab
-  if (favSubCount > 1) {
-    const indicatorY = favTabY + favTabH;
-    const segW = Math.floor(favTabW / favSubCount);
+  {
+    const indicatorY = tabY + tabH;
+    const segW = Math.floor(tabW / 2);
     const segX = favActiveSub * segW;
     fill_rect(segX, indicatorY, segW, 1, 1);
   }
+  tabX += tabW + tabGap;
+
+  // Set tab
+  const setLabel = `S ${setActiveSub + 1}`;
+  if (currentPage === 9) {
+    fill_rect(tabX, tabY, tabW, tabH, 1);
+    print(tabX + 1, tabY + 1, setLabel, 0);
+  } else if (setState >= 1) {
+    print(tabX + 1, tabY + 1, setLabel, 1);
+  } else {
+    print(tabX + 1, tabY + 1, setLabel, 1);
+  }
+  {
+    const indicatorY = tabY + tabH;
+    const segW = Math.floor(tabW / 2);
+    const segX = tabX + setActiveSub * segW;
+    fill_rect(segX, indicatorY, segW, 1, 1);
+  }
+  tabX += tabW + tabGap;
 
   // Device name section: vertical line on left, horizontal line above
-  const nameLeft = favTabW + 6;
+  const nameLeft = tabX + 4;
   draw_rect(nameLeft, 53, 1, SCREEN_HEIGHT - 53, 1);            // vertical left edge
   draw_rect(nameLeft, 53, SCREEN_WIDTH - nameLeft, 1, 1);       // horizontal top edge
   const name = deviceName || "No Device";
-  set_clip_rect(nameLeft + 2, favTabY, SCREEN_WIDTH - nameLeft - 3, favTabH);
-  print(nameLeft + 3, favTabY + 1, name, 1);
+  set_clip_rect(nameLeft + 2, tabY, SCREEN_WIDTH - nameLeft - 3, tabH);
+  print(nameLeft + 3, tabY + 1, name, 1);
   clear_clip_rect();
 
   // Learn mode indicator (overlays right side)
@@ -1050,11 +1116,11 @@ function drawFooter() {
     const learnText = "LEARN";
     if (Math.floor(tickCount / 15) % 2 === 0) {
       const w = text_width(learnText);
-      fill_rect(SCREEN_WIDTH - w - 4, favTabY, w + 3, favTabH, 1);
-      print(SCREEN_WIDTH - w - 2, favTabY + 1, learnText, 0);
+      fill_rect(SCREEN_WIDTH - w - 4, tabY, w + 3, tabH, 1);
+      print(SCREEN_WIDTH - w - 2, tabY + 1, learnText, 0);
     } else {
       const w = text_width(learnText);
-      print(SCREEN_WIDTH - w - 2, favTabY + 1, learnText, 1);
+      print(SCREEN_WIDTH - w - 2, tabY + 1, learnText, 1);
     }
   }
 }
@@ -1128,12 +1194,24 @@ function scheduleLEDs() {
     }
   }
 
-  // Fav step LEDs (step 9-10) — both reflect fav slot 8 state
+  // Fav step LEDs (step 9=*1, step 10=*2)
   for (let fi = 0; fi < 2; fi++) {
     const note = FAV_STEP_NOTE_BASE + fi;
-    if (currentPage === 8) {
+    if (currentPage === 8 && favActiveSub === fi) {
       ledQueue.push(["pad", note, White]);
     } else if (favState >= 1) {
+      ledQueue.push(["pad", note, DarkGrey]);
+    } else {
+      ledQueue.push(["pad", note, Black]);
+    }
+  }
+
+  // Set step LEDs (step 13=S1, step 14=S2)
+  for (let si = 0; si < 2; si++) {
+    const note = SET_STEP_NOTE_BASE + si;
+    if (currentPage === 9 && setActiveSub === si) {
+      ledQueue.push(["pad", note, White]);
+    } else if (setState >= 1) {
       ledQueue.push(["pad", note, DarkGrey]);
     } else {
       ledQueue.push(["pad", note, Black]);

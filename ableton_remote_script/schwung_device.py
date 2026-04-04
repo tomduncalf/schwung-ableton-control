@@ -66,6 +66,10 @@ CMD_FAV_ADD_ACK = 0x0F           # Live -> Move: fav_index, result (0=ok, 1=full
 # SysEx commands: Move -> Live (favourites)
 CMD_FAV_ADD = 0x1E               # Move -> Live: fav_index (0/1), knob_idx
 
+# SysEx commands: set pages (cross-device per-set favourites)
+CMD_SET_ADD = 0x1F               # Move -> Live: set_index (0/1), knob_idx
+CMD_SET_ADD_ACK = 0x20           # Live -> Move: set_index, result (0=ok, 1=full, 2=no binding)
+
 # Persistence
 if sys.platform == 'darwin':
     _CONFIG_DIR = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support', 'SchwungDeviceControl')
@@ -93,7 +97,7 @@ class SchwungDeviceControl(ControlSurface):
         self._device_list = []
         self._device_index = 0
         self._current_page = 0   # index into pages array, or -1 if on empty slot
-        self._current_slot = 0   # always valid slot index (0-9, 8-9 = favourites)
+        self._current_slot = 0   # always valid slot index (0-9, 8=fav, 9=set)
         self._active_params = [None] * 8
         self._active_listeners = [None] * 8
         self._condition_listeners = []  # [(param, callback), ...]
@@ -107,8 +111,14 @@ class SchwungDeviceControl(ControlSurface):
         self._selected_device = None
         self._track_device_listener_installed = False
 
+        # Set bindings (cross-device, per-set)
+        self._set_bindings = {}  # {"pages": [...]}
+        self._set_bindings_source_path = None
+        self._set_file_path_cache = None  # last known song file_path
+
         self._bindings_mtimes = {}  # {device_hash: mtime}
         self._load_bindings()
+        self._load_set_bindings()
         self._setup_listeners()
         self._schedule_heartbeat()
 
@@ -295,6 +305,9 @@ class SchwungDeviceControl(ControlSurface):
         elif cmd == CMD_FAV_ADD:
             if len(data) >= 2:
                 self._handle_fav_add(data[0], data[1])
+        elif cmd == CMD_SET_ADD:
+            if len(data) >= 2:
+                self._handle_set_add(data[0], data[1])
 
     # =========================================================================
     # Knob value handling (Move -> Live parameter changes)
@@ -402,7 +415,7 @@ class SchwungDeviceControl(ControlSurface):
         self.song().view.select_device(device)
 
     def _handle_page_change(self, slot_idx):
-        if slot_idx < 0 or slot_idx >= 10:
+        if slot_idx < 0 or slot_idx >= 12:
             return
         # Slot 8/9 = jump to fav slot 8 subpage 0/1 (dedicated buttons, no cycling)
         fav_target_sub = None
@@ -411,6 +424,11 @@ class SchwungDeviceControl(ControlSurface):
             slot_idx = 8
         elif slot_idx == 8:
             fav_target_sub = 0
+        # Slot 10/11 = jump to set slot 9 subpage 0/1
+        if slot_idx == 11 or slot_idx == 10:
+            target_sub = 1 if slot_idx == 11 else 0
+            self._handle_set_page_change(target_sub)
+            return
         device = self._selected_device
         if device is None:
             return
@@ -615,12 +633,244 @@ class SchwungDeviceControl(ControlSurface):
         self._send_full_state()
 
     # =========================================================================
+    # Set pages (cross-device per-set favourites)
+    # =========================================================================
+
+    def _handle_set_page_change(self, target_sub):
+        """Switch to a set page subpage."""
+        device = self._selected_device
+        set_pages = self._set_bindings.get('pages', [])
+        # Save current slot memory
+        if device:
+            device_hash = self._get_device_hash(device)
+            if device_hash not in self._slot_page_memory:
+                self._slot_page_memory[device_hash] = {}
+            self._slot_page_memory[device_hash][self._current_slot] = self._current_page
+        if target_sub < len(set_pages):
+            self._current_page = target_sub  # index into _set_bindings['pages']
+        else:
+            self._current_page = -1  # empty
+        self._current_slot = 9
+        self._apply_bindings_for_device(device)
+        self._send_full_state()
+
+    def _handle_set_add(self, set_index, knob_idx):
+        """Copy binding from current page's knob to a set page, including device reference."""
+        if set_index < 0 or set_index > 1 or knob_idx < 0 or knob_idx >= 8:
+            return
+        device = self._selected_device
+        if device is None:
+            return
+        device_hash = self._get_device_hash(device)
+        pages = self._bindings.get(device_hash, {}).get('pages', [])
+
+        # Get source binding — could be from device page, fav page, or even another set page
+        if self._current_slot == 9:
+            # On set page: source from set bindings
+            set_pages = self._set_bindings.get('pages', [])
+            if self._current_page < 0 or self._current_page >= len(set_pages):
+                self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
+                return
+            source_knobs = set_pages[self._current_page].get('knobs', {})
+            source_binding = source_knobs.get(str(knob_idx))
+            if source_binding is None:
+                self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
+                return
+            # Already has device_hash
+            new_binding = copy.deepcopy(source_binding)
+        else:
+            # On device/fav page: source from device bindings
+            if self._current_page < 0 or self._current_page >= len(pages):
+                self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
+                return
+            source_knobs = pages[self._current_page].get('knobs', {})
+            source_binding = source_knobs.get(str(knob_idx))
+            if source_binding is None:
+                self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
+                return
+            # Add device reference
+            binding_copy = copy.deepcopy(source_binding)
+            if isinstance(binding_copy, list):
+                # Conditional binding — take first entry for set page (simplify)
+                binding_copy = binding_copy[0] if binding_copy else None
+                if binding_copy is None:
+                    self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
+                    return
+            new_binding = binding_copy
+            new_binding['device_hash'] = device_hash
+            new_binding['device_name'] = device.name
+
+        # Ensure set pages exist
+        if 'pages' not in self._set_bindings:
+            self._set_bindings['pages'] = []
+        set_pages = self._set_bindings['pages']
+        while len(set_pages) <= set_index:
+            set_pages.append({'name': 'S {}'.format(len(set_pages) + 1), 'knobs': {}})
+        target_page = set_pages[set_index]
+
+        # Find first free knob (0-7)
+        knobs = target_page.get('knobs', {})
+        free_slot = None
+        for i in range(8):
+            if str(i) not in knobs:
+                free_slot = i
+                break
+        if free_slot is None:
+            self._send_sysex(CMD_SET_ADD_ACK, [set_index, 1])  # full
+            return
+
+        knobs[str(free_slot)] = new_binding
+        target_page['knobs'] = knobs
+        self._save_set_bindings()
+
+        self._send_sysex(CMD_SET_ADD_ACK, [set_index, 0])  # success
+        self.log_message('SchwungDeviceControl: set add knob={} -> set {} knob {}'.format(
+            knob_idx, set_index, free_slot))
+
+        if self._current_slot == 9:
+            self._apply_bindings_for_device(device)
+        self._send_full_state()
+
+    def _apply_set_page_bindings(self):
+        """Apply cross-device bindings from the current set page."""
+        set_pages = self._set_bindings.get('pages', [])
+        if self._current_page < 0 or self._current_page >= len(set_pages):
+            return
+        page = set_pages[self._current_page]
+        for knob_key, binding in page.get('knobs', {}).items():
+            knob_idx = int(knob_key)
+            if 0 <= knob_idx < 8:
+                device_hash = binding.get('device_hash')
+                if device_hash:
+                    device = self._find_device_by_hash(device_hash)
+                    if device:
+                        param = self._resolve_param(device, binding)
+                        if param is not None:
+                            self._bind_param_to_knob(knob_idx, param)
+
+    def _find_device_by_hash(self, device_hash):
+        """Find a device anywhere in the set by its hash."""
+        for track in list(self.song().tracks) + list(self.song().return_tracks) + [self.song().master_track]:
+            for device in track.devices:
+                found = self._search_device_recursive(device, device_hash)
+                if found:
+                    return found
+        return None
+
+    def _search_device_recursive(self, device, device_hash):
+        if self._get_device_hash(device) == device_hash:
+            return device
+        if device.can_have_chains:
+            for chain in device.chains:
+                for nested in chain.devices:
+                    found = self._search_device_recursive(nested, device_hash)
+                    if found:
+                        return found
+        return None
+
+    def _get_set_dir(self):
+        """Get the project directory for the current set."""
+        try:
+            file_path = self.song().file_path
+            if file_path:
+                return os.path.dirname(file_path)
+        except:
+            pass
+        return None
+
+    def _get_set_bindings_path(self):
+        """Get the bindings path for the current set file."""
+        try:
+            file_path = self.song().file_path
+            if not file_path:
+                return None
+            base = os.path.splitext(os.path.basename(file_path))[0]
+            return os.path.join(os.path.dirname(file_path), base + '.schwung-set.json')
+        except:
+            return None
+
+    def _find_most_recent_set_bindings(self):
+        """Find the most recent .schwung-set.json in the project directory."""
+        set_dir = self._get_set_dir()
+        if not set_dir or not os.path.isdir(set_dir):
+            return None
+        candidates = []
+        try:
+            for fname in os.listdir(set_dir):
+                if fname.endswith('.schwung-set.json'):
+                    fpath = os.path.join(set_dir, fname)
+                    candidates.append((os.path.getmtime(fpath), fpath))
+        except:
+            return None
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+
+    def _load_set_bindings(self):
+        """Load set bindings from most recent file in project directory."""
+        path = self._find_most_recent_set_bindings()
+        if path:
+            try:
+                with open(path, 'r') as f:
+                    self._set_bindings = json.load(f)
+                self._set_bindings_source_path = path
+                self.log_message('SchwungDeviceControl: loaded set bindings from {}'.format(path))
+            except Exception as e:
+                self._set_bindings = {}
+                self._set_bindings_source_path = None
+                self.log_message('SchwungDeviceControl: set bindings load error: {}'.format(e))
+        else:
+            self._set_bindings = {}
+            self._set_bindings_source_path = None
+        try:
+            self._set_file_path_cache = self.song().file_path
+        except:
+            self._set_file_path_cache = None
+
+    def _save_set_bindings(self):
+        """Save set bindings (copy-on-write: creates new file if set was saved-as)."""
+        target = self._get_set_bindings_path()
+        if not target:
+            self.log_message('SchwungDeviceControl: set bindings not saved (unsaved set)')
+            return
+        try:
+            # Sort for readable JSON
+            pages = self._set_bindings.get('pages', [])
+            for page in pages:
+                knobs = page.get('knobs', {})
+                page['knobs'] = dict(sorted(knobs.items(), key=lambda kv: int(kv[0])))
+            with open(target, 'w') as f:
+                json.dump(self._set_bindings, f, indent=2)
+            self._set_bindings_source_path = target
+            self.log_message('SchwungDeviceControl: set bindings saved to {}'.format(target))
+        except Exception as e:
+            self.log_message('SchwungDeviceControl: set bindings save error: {}'.format(e))
+
+    def _check_set_file_changed(self):
+        """Check if the song file changed (e.g. opened new set) and reload."""
+        try:
+            current = self.song().file_path
+        except:
+            current = None
+        if current != self._set_file_path_cache:
+            self._set_file_path_cache = current
+            self._load_set_bindings()
+            return True
+        return False
+
+    # =========================================================================
     # Learn mode
     # =========================================================================
 
     def _learn_knob(self, knob_idx):
         self.log_message('SchwungDeviceControl: _learn_knob({})'.format(knob_idx))
         if knob_idx < 0 or knob_idx >= 8:
+            return
+
+        # Delegate to set page learn if on set page
+        if self._current_slot == 9:
+            self._learn_set_knob(knob_idx)
             return
 
         # Get the currently selected/focused parameter in Live
@@ -704,20 +954,81 @@ class SchwungDeviceControl(ControlSurface):
         self.log_message('SchwungDeviceControl: learned knob {} -> {} ({})'.format(
             knob_idx, param.name, device.name))
 
+    def _learn_set_knob(self, knob_idx):
+        """Learn a knob on the current set page (cross-device binding)."""
+        param = self.song().view.selected_parameter
+        device = self._get_selected_device()
+        if param is None or device is None:
+            return
+
+        param_index = None
+        for i, p in enumerate(device.parameters):
+            if p == param:
+                param_index = i
+                break
+        if param_index is None:
+            return
+
+        device_hash = self._get_device_hash(device)
+
+        if 'pages' not in self._set_bindings:
+            self._set_bindings['pages'] = []
+        set_pages = self._set_bindings['pages']
+        # Create set page if needed
+        if self._current_page < 0:
+            self._current_page = 0
+        while len(set_pages) <= self._current_page:
+            set_pages.append({'name': 'S {}'.format(len(set_pages) + 1), 'knobs': {}})
+        knobs = set_pages[self._current_page].get('knobs', {})
+        knobs[str(knob_idx)] = {
+            'device_hash': device_hash,
+            'device_name': device.name,
+            'param_index': param_index,
+            'param_name': param.name,
+            'short_name': param.name
+        }
+        set_pages[self._current_page]['knobs'] = knobs
+
+        self._bind_param_to_knob(knob_idx, param)
+
+        display_name = param.name
+        name_bytes = self._encode_string(display_name, MAX_PARAM_NAME_LEN)
+        self._send_sysex(CMD_LEARN_ACK, [knob_idx] + name_bytes + [0])
+
+        steps = []
+        for i in range(8):
+            p = self._active_params[i]
+            if p is None:
+                steps.append(1)
+            else:
+                steps.append(min(127, self._get_param_num_steps(p)) + 1)
+        self._send_sysex(CMD_PARAM_STEPS, steps)
+
+        self._save_set_bindings()
+        self.log_message('SchwungDeviceControl: set learned knob {} -> {} ({})'.format(
+            knob_idx, param.name, device.name))
+
     def _unmap_knob(self, knob_idx):
         if knob_idx < 0 or knob_idx >= 8:
             return
 
         self._unbind_knob(knob_idx)
 
-        device = self._selected_device
-        if device:
-            device_hash = self._get_device_hash(device)
-            device_entry = self._bindings.get(device_hash, {})
-            pages = device_entry.get('pages', [])
-            if self._current_page < len(pages):
-                pages[self._current_page]['knobs'].pop(str(knob_idx), None)
-                self._save_bindings()
+        if self._current_slot == 9:
+            # Set page: unmap from set bindings
+            set_pages = self._set_bindings.get('pages', [])
+            if 0 <= self._current_page < len(set_pages):
+                set_pages[self._current_page].get('knobs', {}).pop(str(knob_idx), None)
+                self._save_set_bindings()
+        else:
+            device = self._selected_device
+            if device:
+                device_hash = self._get_device_hash(device)
+                device_entry = self._bindings.get(device_hash, {})
+                pages = device_entry.get('pages', [])
+                if self._current_page < len(pages):
+                    pages[self._current_page]['knobs'].pop(str(knob_idx), None)
+                    self._save_bindings()
 
         # Send updated param info (empty)
         self._send_sysex(CMD_PARAM_INFO, [knob_idx] + self._encode_string('', MAX_PARAM_NAME_LEN) + [0])
@@ -846,6 +1157,12 @@ class SchwungDeviceControl(ControlSurface):
         try:
             self._remove_all_param_listeners()
 
+            if self._current_slot == 9:
+                self._apply_set_page_bindings()
+                return
+
+            if device is None:
+                return
             device_hash = self._get_device_hash(device)
             device_entry = self._bindings.get(device_hash, {})
             pages = device_entry.get('pages', [])
@@ -871,6 +1188,15 @@ class SchwungDeviceControl(ControlSurface):
                                 self._bind_param_to_knob(knob_idx, param)
         finally:
             self._applying_bindings = False
+
+    def _get_set_display_name(self, knob_idx, fallback):
+        """Get short_name from set binding for display."""
+        set_pages = self._set_bindings.get('pages', [])
+        if 0 <= self._current_page < len(set_pages):
+            binding = set_pages[self._current_page].get('knobs', {}).get(str(knob_idx))
+            if binding:
+                return binding.get('short_name', fallback)
+        return fallback
 
     def _get_display_name(self, device_hash, knob_idx, fallback):
         """Get short_name from binding for display, falling back to the full param name."""
@@ -998,8 +1324,19 @@ class SchwungDeviceControl(ControlSurface):
         fav_active_sub = 0
         if current_slot == 8 and self._current_page >= 0 and self._current_page in fav_pages:
             fav_active_sub = fav_pages.index(self._current_page)
+        # Set slot info (slot 9, with subpages)
+        set_pages = self._set_bindings.get('pages', [])
+        if current_slot == 9:
+            set_state = 2
+        elif set_pages and any(p.get('knobs', {}) for p in set_pages):
+            set_state = 1
+        else:
+            set_state = 0
+        set_sub_count = len(set_pages)
+        set_active_sub = max(0, self._current_page) if current_slot == 9 else 0
         self._send_sysex(CMD_PAGE_INFO, [current_slot, slot_count,
-                                         fav_state + 1, fav_sub_count + 1, fav_active_sub + 1])
+                                         fav_state + 1, fav_sub_count + 1, fav_active_sub + 1,
+                                         set_state + 1, set_sub_count + 1, set_active_sub + 1])
         sleep(SYSEX_DELAY)
 
         # Page names (one per regular slot, showing active sub-page name)
@@ -1026,7 +1363,10 @@ class SchwungDeviceControl(ControlSurface):
         for i in range(8):
             param = self._active_params[i]
             if param:
-                name = self._get_display_name(device_hash, i, param.name)
+                if current_slot == 9:
+                    name = self._get_set_display_name(i, param.name)
+                else:
+                    name = self._get_display_name(device_hash, i, param.name)
             else:
                 name = ''
             self._send_sysex(CMD_PARAM_INFO, [i] + self._encode_string(name, MAX_PARAM_NAME_LEN) + [0])
@@ -1098,6 +1438,8 @@ class SchwungDeviceControl(ControlSurface):
         if self._connected:
             self._send_sysex(CMD_HEARTBEAT, [])
         self._check_bindings_file()
+        if self._check_set_file_changed() and self._connected:
+            self._send_full_state()
         self._schedule_heartbeat()
 
     def _check_bindings_file(self):
