@@ -109,6 +109,7 @@ let deviceCount = 0;
 let paramNames = new Array(8).fill("");
 let paramValues = new Array(8).fill(0);
 let paramSteps = new Array(8).fill(0); // 0 = continuous, N = discrete steps
+let paramAccum = new Array(8).fill(0); // fractional accumulator for discrete knobs
 
 // Page state
 let currentPage = 0;
@@ -457,16 +458,20 @@ function handleKnobTurn(idx, rawValue) {
   const numSteps = paramSteps[idx];
 
   if (numSteps >= 2) {
-    // Stepped parameter: ignore acceleration, move ±1 step per detent
-    const rawDelta = decodeDelta(rawValue);
-    const direction = rawDelta > 0 ? 1 : rawDelta < 0 ? -1 : 0;
-    if (direction === 0) return;
+    // Discrete parameter: accumulate fractional deltas, snap for output
+    const rawDelta = decodeAcceleratedDelta(rawValue, idx);
+    const scale = Math.min(0.3, 1.2 / numSteps);
+    paramAccum[idx] += rawDelta * scale;
+    // Only advance when accumulator crosses a full step
     const stepSize = 127 / (numSteps - 1);
     const currentStep = Math.round(paramValues[idx] / stepSize);
-    const newStep = Math.max(0, Math.min(numSteps - 1, currentStep + direction));
+    const accumSteps = Math.trunc(paramAccum[idx] / stepSize);
+    if (accumSteps === 0) return;
+    paramAccum[idx] -= accumSteps * stepSize;
+    const newStep = Math.max(0, Math.min(numSteps - 1, currentStep + accumSteps));
     paramValues[idx] = Math.round(newStep * stepSize);
   } else {
-    // Continuous parameter: accelerated delta as before
+    // Continuous parameter: accelerated delta
     const rawDelta = decodeAcceleratedDelta(rawValue, idx);
     const delta =
       Math.round(rawDelta * 0.2) || (rawDelta > 0 ? 1 : rawDelta < 0 ? -1 : 0);
