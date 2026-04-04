@@ -448,6 +448,10 @@ function handleInternalNoteOn(note, velocity) {
       marqueeKnob = note;
       marqueeOffset = 0;
     }
+    // In learn mode, touching a knob is enough to bind it
+    if (learnMode && connected) {
+      sendCommand(CMD_LEARN_KNOB, [note]);
+    }
     needsRedraw = true;
     return;
   }

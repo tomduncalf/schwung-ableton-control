@@ -350,14 +350,16 @@ class SchwungDeviceControl(ControlSurface):
         pages[self._current_page]['knobs'][str(knob_idx)] = {
             'param_index': param_index,
             'param_hash': param_hash.hex(),
-            'param_name': param.name
+            'param_name': param.name,
+            'short_name': param.name
         }
 
         # Activate immediately
         self._bind_param_to_knob(knob_idx, param)
 
-        # Send ACK to Move
-        name_bytes = self._encode_string(param.name, MAX_PARAM_NAME_LEN)
+        # Send ACK to Move (use short_name for display)
+        display_name = pages[self._current_page]['knobs'][str(knob_idx)].get('short_name', param.name)
+        name_bytes = self._encode_string(display_name, MAX_PARAM_NAME_LEN)
         self._send_sysex(CMD_LEARN_ACK, [knob_idx] + name_bytes + [0])
 
         self._save_bindings()
@@ -450,6 +452,16 @@ class SchwungDeviceControl(ControlSurface):
                     if param is not None:
                         self._bind_param_to_knob(knob_idx, param)
 
+    def _get_display_name(self, device_hash, knob_idx, fallback):
+        """Get short_name from binding for display, falling back to the full param name."""
+        device_entry = self._bindings.get(device_hash, {})
+        pages = device_entry.get('pages', [])
+        if self._current_page < len(pages):
+            binding = pages[self._current_page].get('knobs', {}).get(str(knob_idx))
+            if binding:
+                return binding.get('short_name', fallback)
+        return fallback
+
     def _resolve_param(self, device, binding):
         """Resolve a binding to a live parameter, using hash then falling back to index."""
         param_hash_hex = binding['param_hash']
@@ -503,10 +515,13 @@ class SchwungDeviceControl(ControlSurface):
             self._send_sysex(CMD_PAGE_NAME, [i] + self._encode_string(name, MAX_PARAM_NAME_LEN) + [0])
             sleep(SYSEX_DELAY)
 
-        # Parameter names
+        # Parameter names (use short_name from binding if available)
         for i in range(8):
             param = self._active_params[i]
-            name = param.name if param else ''
+            if param:
+                name = self._get_display_name(device_hash, i, param.name)
+            else:
+                name = ''
             self._send_sysex(CMD_PARAM_INFO, [i] + self._encode_string(name, MAX_PARAM_NAME_LEN) + [0])
             sleep(SYSEX_DELAY)
 
