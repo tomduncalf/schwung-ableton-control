@@ -69,6 +69,7 @@ const CMD_PAGE_INFO = 0x09;
 const CMD_PAGE_NAME = 0x0a;
 const CMD_PARAM_VALUE_STRING = 0x0b; // Live -> Move: knob_idx, value string
 const CMD_PARAM_STEPS = 0x0c; // Live -> Move: 8 step counts (0=continuous)
+const CMD_SLOT_SUBPAGE_INFO = 0x0d; // Live -> Move: per-slot [subpage_count, active_subpage] (offset +1)
 
 // SysEx commands: Move -> Live
 const CMD_HELLO = 0x10;
@@ -118,6 +119,8 @@ let paramAccum = new Array(8).fill(0); // fractional accumulator for discrete kn
 let currentPage = 0;
 let pageCount = 1;
 let pageNames = ["1", "2", "3", "4", "5", "6", "7", "8"];
+let slotSubpageCounts = new Array(8).fill(1);
+let slotActiveSubpage = new Array(8).fill(0);
 
 // Step button notes (step 1-8 = notes 16-23)
 const STEP_NOTE_BASE = 16;
@@ -358,6 +361,15 @@ function handleSysEx(msg) {
       for (let i = 0; i < Math.min(8, payload.length); i++) {
         paramSteps[i] = Math.max(0, payload[i] - 1);
       }
+      break;
+
+    case CMD_SLOT_SUBPAGE_INFO:
+      // Per-slot [subpage_count, active_subpage], offset by +1
+      for (let i = 0; i < Math.min(8, Math.floor(payload.length / 2)); i++) {
+        slotSubpageCounts[i] = Math.max(0, payload[i * 2] - 1);
+        slotActiveSubpage[i] = Math.max(0, payload[i * 2 + 1] - 1);
+      }
+      needsRedraw = true;
       break;
   }
 }
@@ -733,31 +745,41 @@ function drawParamsCompact() {
 
 function drawPageTabs() {
   const tabY = 30;
-  const tabH = 10;
+  const tabVisH = 9;
+  const rowStep = 11; // 9px tab + 1px indicator + 1px gap
   const colW = 31;
 
   for (let i = 0; i < 8; i++) {
     const col = i % 4;
     const row = Math.floor(i / 4);
     const x = col * (colW + 1);
-    const y = tabY + row * tabH;
+    const y = tabY + row * rowStep;
 
     const hasControls = i < pageCount;
 
     if (i === currentPage) {
-      // Active page: always render inverted block
-      fill_rect(x, y, colW, tabH - 1, 1);
+      fill_rect(x, y, colW, tabVisH, 1);
       if (hasControls) {
         const name = pageNames[i] || `${i + 1}`;
-        set_clip_rect(x, y, colW, tabH - 1);
+        set_clip_rect(x, y, colW, tabVisH);
         print(x + 1, y + 1, name, 0);
         clear_clip_rect();
       }
     } else if (hasControls) {
       const name = pageNames[i] || `${i + 1}`;
-      set_clip_rect(x, y, colW, tabH - 1);
+      set_clip_rect(x, y, colW, tabVisH);
       print(x + 1, y + 1, name, 1);
       clear_clip_rect();
+    }
+
+    // Subpage indicator: partial line under tab
+    const subCount = slotSubpageCounts[i];
+    if (subCount > 1 && hasControls) {
+      const activeSub = slotActiveSubpage[i];
+      const indicatorY = y + tabVisH;
+      const segW = Math.floor(colW / subCount);
+      const segX = x + activeSub * segW;
+      fill_rect(segX, indicatorY, segW, 1, 1);
     }
   }
 }

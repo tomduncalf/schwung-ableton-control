@@ -39,6 +39,7 @@ CMD_PAGE_INFO = 0x09
 CMD_PAGE_NAME = 0x0A
 CMD_PARAM_VALUE_STRING = 0x0B  # Live -> Move: knob_idx, value string (e.g. "3.5 kHz")
 CMD_PARAM_STEPS = 0x0C         # Live -> Move: 8 step counts (0=continuous, N=discrete steps)
+CMD_SLOT_SUBPAGE_INFO = 0x0D   # Live -> Move: per-slot [subpage_count, active_subpage] (offset +1)
 
 # SysEx commands: Move -> Live
 CMD_HELLO = 0x10
@@ -741,6 +742,26 @@ class SchwungDeviceControl(ControlSurface):
             else:
                 steps.append(min(127, self._get_param_num_steps(param)) + 1)
         self._send_sysex(CMD_PARAM_STEPS, steps)
+
+        # Slot subpage info: per-slot [subpage_count, active_subpage_index], offset +1
+        subpage_info = []
+        for slot in range(slot_count):
+            slot_pages = self._get_pages_for_slot(device_hash, slot)
+            num_subpages = len(slot_pages)
+            if slot == current_slot:
+                if self._current_page >= 0 and self._current_page in slot_pages:
+                    active_sub = slot_pages.index(self._current_page)
+                else:
+                    active_sub = 0
+            else:
+                remembered = self._slot_page_memory.get(device_hash, {}).get(slot)
+                if remembered is not None and remembered in slot_pages:
+                    active_sub = slot_pages.index(remembered)
+                else:
+                    active_sub = 0
+            subpage_info.append(num_subpages + 1)
+            subpage_info.append(active_sub + 1)
+        self._send_sysex(CMD_SLOT_SUBPAGE_INFO, subpage_info)
 
     # =========================================================================
     # Connection / heartbeat

@@ -61,6 +61,7 @@ Persisted at `ableton_remote_script/bindings.json`. Keyed by device hash (SHA1 o
 - `_slot_page_memory`: `{device_hash: {slot: page_index}}` — remembers last sub-page per slot
 - CMD_PAGE_INFO sends `[current_slot, slot_count]` (not page index/count)
 - CMD_PAGE_NAME sends the active sub-page's name per slot position
+- CMD_SLOT_SUBPAGE_INFO sends per-slot `[subpage_count, active_subpage_index]` (offset +1 for SysEx safety)
 
 ### State (Ableton side — schwung_device.py)
 
@@ -75,6 +76,7 @@ Persisted at `ableton_remote_script/bindings.json`. Keyed by device hash (SHA1 o
 ### State (Move side — ui.js)
 
 - `currentPage` / `pageCount` / `pageNames[0..7]`: slot-space values received from Ableton
+- `slotSubpageCounts[0..7]` / `slotActiveSubpage[0..7]`: per-slot subpage info for tab indicators
 - `paramNames[0..7]` / `paramValues[0..7]`: current knob labels and values
 - `touchStack`: ordered list of currently touched knobs (for multi-touch)
 - `connected` / `heartbeatTimer`: connection state (720-tick timeout)
