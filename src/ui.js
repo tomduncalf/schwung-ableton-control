@@ -28,6 +28,7 @@ import {
   MoveMainKnob,
   MoveMainButton,
   MoveDelete,
+  MoveRow4,
   White,
   Black,
   BrightGreen,
@@ -71,6 +72,7 @@ const CMD_PAGE_NAME = 0x0a;
 const CMD_PARAM_VALUE_STRING = 0x0b; // Live -> Move: knob_idx, value string
 const CMD_PARAM_STEPS = 0x0c; // Live -> Move: 8 step counts (0=continuous)
 const CMD_SLOT_SUBPAGE_INFO = 0x0d; // Live -> Move: per-slot [subpage_count, active_subpage] (offset +1)
+const CMD_DEVICE_LIST_RESPONSE = 0x0e; // Live -> Move: offset, total, name1\0, name2\0, ...
 
 // SysEx commands: Move -> Live
 const CMD_HELLO = 0x10;
@@ -85,6 +87,8 @@ const CMD_PAGE_CHANGE = 0x18; // Move -> Live: pageIndex
 const CMD_REQUEST_VALUE_STRING = 0x19; // Move -> Live: knob_idx
 const CMD_PAGE_SEQUENTIAL = 0x1a; // Move -> Live: direction (0x00=prev, 0x01=next)
 const CMD_RESET_PARAM = 0x1b;    // Move -> Live: knob_idx (reset to default value)
+const CMD_DEVICE_LIST_REQUEST = 0x1c; // Move -> Live: offset (request 8 device names)
+const CMD_DEVICE_SELECT = 0x1d;       // Move -> Live: device_index (select by flat index)
 
 // Timing
 const HEARTBEAT_TIMEOUT_TICKS = 720; // ~3 seconds at ~240fps (tick rate is faster than expected)
@@ -134,6 +138,12 @@ let overlayKnob = -1; // which knob's overlay is showing (-1 = none)
 let overlayValueStr = ""; // formatted value string from Ableton
 let overlayTimer = 0; // ticks remaining before overlay auto-hides
 const OVERLAY_HOLD_TICKS = 1; // dismiss immediately on release
+
+// Device browser state (Track 4 hold modifier)
+let deviceBrowseMode = false;
+let deviceBrowseOffset = 0;  // first device index on current page
+let deviceBrowseTotal = 0;   // total device count
+let deviceBrowseNames = new Array(8).fill(""); // names for current page of 8
 
 // LED queue for progressive updates (no cache — raw move_midi_internal_send)
 let ledQueue = [];
@@ -375,6 +385,26 @@ function handleSysEx(msg) {
       }
       needsRedraw = true;
       break;
+
+    case CMD_DEVICE_LIST_RESPONSE:
+      // [offset, total, name1\0, name2\0, ...]
+      if (payload.length >= 2) {
+        deviceBrowseOffset = payload[0];
+        deviceBrowseTotal = payload[1];
+        deviceBrowseNames.fill("");
+        let nameIdx = 0;
+        let strStart = 2;
+        for (let i = 2; i < payload.length && nameIdx < 8; i++) {
+          if (payload[i] === 0) {
+            deviceBrowseNames[nameIdx] = decodeString(payload.slice(strStart, i + 1));
+            nameIdx++;
+            strStart = i + 1;
+          }
+        }
+        updateDeviceBrowseLEDs();
+        needsRedraw = true;
+      }
+      break;
   }
 }
 
@@ -426,6 +456,40 @@ function handleInternalCC(cc, value) {
   // Delete (X) button state
   if (cc === MoveDelete) {
     deleteHeld = value > 63;
+    return;
+  }
+
+  // Track 4 button (MoveRow4 = CC 40) — device browser modifier
+  if (cc === MoveRow4) {
+    if (value > 63 && !deviceBrowseMode) {
+      deviceBrowseMode = true;
+      deviceBrowseOffset = 0;
+      sendCommand(CMD_DEVICE_LIST_REQUEST, [0]);
+      needsRedraw = true;
+    } else if (value <= 63 && deviceBrowseMode) {
+      deviceBrowseMode = false;
+      scheduleLEDs(); // restore normal LEDs
+      needsRedraw = true;
+    }
+    return;
+  }
+
+  // In device browse mode, intercept arrows for paging
+  if (deviceBrowseMode) {
+    if (cc === MoveLeft && value > 63) {
+      if (deviceBrowseOffset > 0) {
+        const newOffset = Math.max(0, deviceBrowseOffset - 8);
+        sendCommand(CMD_DEVICE_LIST_REQUEST, [newOffset]);
+      }
+      return;
+    }
+    if (cc === MoveRight && value > 63) {
+      if (deviceBrowseOffset + 8 < deviceBrowseTotal) {
+        sendCommand(CMD_DEVICE_LIST_REQUEST, [deviceBrowseOffset + 8]);
+      }
+      return;
+    }
+    // Absorb all other CCs in browse mode (knobs, back, menu, etc.)
     return;
   }
 
@@ -563,9 +627,18 @@ function handleInternalNoteOn(note, velocity) {
     return;
   }
 
-  // Step buttons 1-8 (notes 16-23) — switch slot (Ableton resolves to page)
+  // Step buttons 1-8 (notes 16-23)
   if (note >= STEP_NOTE_BASE && note < STEP_NOTE_BASE + 8) {
     const slotIdx = note - STEP_NOTE_BASE;
+    // In device browse mode, select device
+    if (deviceBrowseMode) {
+      const devIdx = deviceBrowseOffset + slotIdx;
+      if (devIdx < deviceBrowseTotal && deviceBrowseNames[slotIdx]) {
+        sendCommand(CMD_DEVICE_SELECT, [devIdx]);
+      }
+      return;
+    }
+    // Normal mode: switch slot (Ableton resolves to page)
     sendCommand(CMD_PAGE_CHANGE, [slotIdx]);
     return;
   }
@@ -612,12 +685,73 @@ function drawScreen() {
     return;
   }
 
+  if (deviceBrowseMode) {
+    drawDeviceBrowser();
+    return;
+  }
+
   drawParams();
   drawFooter();
 
   if (overlayKnob >= 0 && overlayTimer > 0) {
     drawValueOverlay();
   }
+}
+
+function drawDeviceBrowser() {
+  // Device list: 2 columns x 4 rows
+  const colW = 63;
+  const startY = 1;
+  const rowH = 12;
+
+  for (let i = 0; i < 8; i++) {
+    const name = deviceBrowseNames[i];
+    if (!name) continue;
+
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const x = col * (colW + 2);
+    const y = startY + row * rowH;
+
+    const label = (deviceBrowseOffset + i + 1) + " " + name;
+    const isCurrentDevice = (deviceBrowseOffset + i) === deviceIndex;
+    if (isCurrentDevice) {
+      fill_rect(x, y - 1, colW, rowH - 1, 1);
+      set_clip_rect(x, y - 1, colW, rowH - 1);
+      print(x + 2, y, label, 0);
+      clear_clip_rect();
+    } else {
+      set_clip_rect(x, y - 1, colW, rowH - 1);
+      print(x + 2, y, label, 1);
+      clear_clip_rect();
+    }
+  }
+
+  // Footer with step label hint
+  draw_rect(0, 53, SCREEN_WIDTH, 1, 1);
+  const hint = "Step 1-8 to select";
+  print(1, 56, hint, 1);
+}
+
+function updateDeviceBrowseLEDs() {
+  if (!deviceBrowseMode) return;
+  // Step LEDs: light up for available devices
+  for (let i = 0; i < 8; i++) {
+    const note = STEP_NOTE_BASE + i;
+    const devIdx = deviceBrowseOffset + i;
+    if (devIdx < deviceBrowseTotal && deviceBrowseNames[i]) {
+      if (devIdx === deviceIndex) {
+        padLed(note, White);
+      } else {
+        padLed(note, DarkGrey);
+      }
+    } else {
+      padLed(note, Black);
+    }
+  }
+  // Arrow LEDs: show if more pages exist
+  buttonLed(MoveLeft, deviceBrowseOffset > 0 ? WhiteLedBright : Black);
+  buttonLed(MoveRight, deviceBrowseOffset + 8 < deviceBrowseTotal ? WhiteLedBright : Black);
 }
 
 function drawDisconnected() {

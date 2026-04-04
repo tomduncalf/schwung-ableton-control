@@ -1,5 +1,4 @@
 - Note entry
-- Switch device mode
 - Learn whole-set controls
   - File alongside set?
   - For set duplicates, fallback to most recent in dir?

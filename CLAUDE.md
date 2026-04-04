@@ -104,7 +104,12 @@ When the condition parameter changes, bindings re-apply automatically.
 - **Menu (CC 118):** toggle learn mode on Move side (also sends CMD_LEARN_START/STOP)
 - **Main wheel (CC 14):** sequential page/subpage navigation (wraps around)
 - **Left/Right (CC 119-120):** device navigation
+- **Track 4 hold (CC 43):** device browser modifier — shows device list, step 1-8 selects device, arrows page through 8-device pages
 - **Back (CC 120):** exit module
+
+## Device Browser Mode
+
+Hold Track 4 to enter device browser. Move requests device names via `CMD_DEVICE_LIST_REQUEST(offset)`, Ableton responds with `CMD_DEVICE_LIST_RESPONSE(offset, total, name1\0, name2\0, ...)`. Step buttons select a device (`CMD_DEVICE_SELECT(index)`). Left/right arrows page through groups of 8. Releasing Track 4 exits browse mode and restores normal display/LEDs.
 
 ## Learn Mode Flow
 

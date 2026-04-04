@@ -55,6 +55,11 @@ CMD_PAGE_CHANGE = 0x18  # Move -> Live: pageIndex
 CMD_REQUEST_VALUE_STRING = 0x19  # Move -> Live: knob_idx
 CMD_PAGE_SEQUENTIAL = 0x1A      # Move -> Live: 0x00=prev, 0x01=next (walks pages in slot order)
 CMD_RESET_PARAM = 0x1B          # Move -> Live: knob_idx (reset to default value)
+CMD_DEVICE_LIST_REQUEST = 0x1C  # Move -> Live: offset (request 8 device names)
+CMD_DEVICE_SELECT = 0x1D        # Move -> Live: device_index (select by flat index)
+
+# SysEx commands: Live -> Move (device browser)
+CMD_DEVICE_LIST_RESPONSE = 0x0E  # Live -> Move: offset, total, name1\0, name2\0, ...
 
 # Persistence
 if sys.platform == 'darwin':
@@ -276,6 +281,12 @@ class SchwungDeviceControl(ControlSurface):
         elif cmd == CMD_RESET_PARAM:
             if len(data) >= 1:
                 self._reset_param_to_default(data[0])
+        elif cmd == CMD_DEVICE_LIST_REQUEST:
+            offset = data[0] if len(data) >= 1 else 0
+            self._send_device_list(offset)
+        elif cmd == CMD_DEVICE_SELECT:
+            if len(data) >= 1:
+                self._select_device_by_index(data[0])
 
     # =========================================================================
     # Knob value handling (Move -> Live parameter changes)
@@ -358,6 +369,28 @@ class SchwungDeviceControl(ControlSurface):
         device = self._device_list[self._device_index]
 
         # Select the device in Live
+        self.song().view.select_device(device)
+
+    def _send_device_list(self, offset):
+        """Send up to 8 device names starting at offset."""
+        if not self._device_list:
+            self._device_list = self._get_device_list()
+        total = len(self._device_list)
+        payload = [min(127, offset), min(127, total)]
+        for i in range(8):
+            idx = offset + i
+            if idx < total:
+                name = self._device_list[idx].name
+                payload += self._encode_string(name, 14) + [0]
+        self._send_sysex(CMD_DEVICE_LIST_RESPONSE, payload)
+
+    def _select_device_by_index(self, index):
+        """Select a device by its flat index in the device list."""
+        if not self._device_list:
+            self._device_list = self._get_device_list()
+        if index < 0 or index >= len(self._device_list):
+            return
+        device = self._device_list[index]
         self.song().view.select_device(device)
 
     def _handle_page_change(self, slot_idx):
