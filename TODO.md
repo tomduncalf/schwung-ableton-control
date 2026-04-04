@@ -1,0 +1,10 @@
+- How can we leverage wheel?
+  - scroll through pages
+- Remember last page per device
+- Note entry
+- Switch device mode
+- Learn whole-set controls
+  - File alongside set?
+  - For set duplicates, fallback to most recent in dir?
+- Update binding on the fly
+- Some way to reset control to zero

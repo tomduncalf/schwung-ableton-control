@@ -72,11 +72,13 @@ class SchwungDeviceControl(ControlSurface):
         self._learn_mode = False
         self._device_list = []
         self._device_index = 0
-        self._current_page = 0
+        self._current_page = 0   # index into pages array, or -1 if on empty slot
+        self._current_slot = 0   # always valid slot index (0-7)
         self._active_params = [None] * 8
         self._active_listeners = [None] * 8
         self._bindings = {}
         self._suppressing_feedback = [False] * 8
+        self._slot_page_memory = {}  # {device_hash: {slot_idx: page_array_index}}
         self._heartbeat_counter = 0
         self._connected = False
         self._selected_device = None
@@ -131,6 +133,7 @@ class SchwungDeviceControl(ControlSurface):
             except ValueError:
                 self._device_index = 0
             self._current_page = 0
+            self._current_slot = 0
             self._apply_bindings_for_device(device)
         else:
             self._device_list = []
@@ -218,6 +221,7 @@ class SchwungDeviceControl(ControlSurface):
             self.log_message('SchwungDeviceControl: learn mode ON')
         elif cmd == CMD_LEARN_STOP:
             self._learn_mode = False
+            self._cleanup_provisional_page()
             self.log_message('SchwungDeviceControl: learn mode OFF')
         elif cmd == CMD_LEARN_KNOB:
             if len(data) >= 1:
@@ -285,6 +289,8 @@ class SchwungDeviceControl(ControlSurface):
             self._navigate_device(1)
         elif cc == CC_LEARN_TOGGLE:
             self._learn_mode = not self._learn_mode
+            if not self._learn_mode:
+                self._cleanup_provisional_page()
             self.log_message('SchwungDeviceControl: learn mode {}'.format(
                 'ON' if self._learn_mode else 'OFF'))
 
@@ -306,14 +312,95 @@ class SchwungDeviceControl(ControlSurface):
         # Select the device in Live
         self.song().view.select_device(device)
 
-    def _handle_page_change(self, page_idx):
-        if page_idx < 0 or page_idx >= 8:
+    def _handle_page_change(self, slot_idx):
+        if slot_idx < 0 or slot_idx >= 8:
             return
-        self._current_page = page_idx
         device = self._selected_device
-        if device:
+        if device is None:
+            return
+        device_hash = self._get_device_hash(device)
+        current_slot = self._get_current_slot(device_hash)
+        pages_in_slot = self._get_pages_for_slot(device_hash, slot_idx)
+
+        if not pages_in_slot:
+            # Empty slot — navigate here, show empty knobs, no page entry created
+            if device_hash not in self._slot_page_memory:
+                self._slot_page_memory[device_hash] = {}
+            self._slot_page_memory[device_hash][current_slot] = self._current_page
+            self._current_page = -1
+            self._current_slot = slot_idx
             self._apply_bindings_for_device(device)
             self._send_full_state()
+            return
+
+        # Save current page as memory for the slot we're leaving
+        if device_hash not in self._slot_page_memory:
+            self._slot_page_memory[device_hash] = {}
+        self._slot_page_memory[device_hash][current_slot] = self._current_page
+
+        if slot_idx == current_slot:
+            # Same slot pressed again: cycle to next sub-page
+            pos = -1
+            try:
+                pos = pages_in_slot.index(self._current_page)
+                next_pos = (pos + 1) % len(pages_in_slot)
+            except ValueError:
+                next_pos = 0
+
+            self.log_message('SchwungDeviceControl: same slot {} pressed, pos={} len={} learn={}'.format(
+                slot_idx, pos, len(pages_in_slot), self._learn_mode))
+
+            current_page_has_knobs = (
+                0 <= self._current_page < len(self._bindings.get(device_hash, {}).get('pages', []))
+                and self._bindings[device_hash]['pages'][self._current_page].get('knobs', {})
+            )
+            if self._learn_mode and pos == len(pages_in_slot) - 1 and current_page_has_knobs:
+                # Cycled past last sub-page in learn mode: create provisional page
+                pages = self._bindings[device_hash]['pages']
+                new_page = {'name': '{}'.format(len(pages) + 1), 'slot': slot_idx, 'knobs': {}}
+                pages.append(new_page)
+                self._current_page = len(pages) - 1
+            else:
+                self._current_page = pages_in_slot[next_pos]
+        else:
+            # Different slot: restore remembered page or first page in slot
+            remembered = self._slot_page_memory.get(device_hash, {}).get(slot_idx)
+            if remembered is not None and remembered in pages_in_slot:
+                self._current_page = remembered
+            else:
+                self._current_page = pages_in_slot[0]
+
+        self._current_slot = slot_idx
+        self._apply_bindings_for_device(device)
+        self._send_full_state()
+
+    # =========================================================================
+    # Slot helpers
+    # =========================================================================
+
+    def _get_slot_for_page(self, device_hash, page_idx):
+        """Return the slot index for a page (defaults to array index)."""
+        pages = self._bindings.get(device_hash, {}).get('pages', [])
+        if page_idx < len(pages):
+            return pages[page_idx].get('slot', page_idx)
+        return page_idx
+
+    def _get_pages_for_slot(self, device_hash, slot_idx):
+        """Return list of page array indices assigned to a slot, in order."""
+        pages = self._bindings.get(device_hash, {}).get('pages', [])
+        return [i for i, p in enumerate(pages) if p.get('slot', i) == slot_idx]
+
+    def _get_slot_count(self, device_hash):
+        """Return number of slots (max slot + 1)."""
+        pages = self._bindings.get(device_hash, {}).get('pages', [])
+        if not pages:
+            return 1
+        max_slot = max(p.get('slot', i) for i, p in enumerate(pages))
+        return max_slot + 1
+
+    def _get_current_slot(self, device_hash=None):
+        """Return the current slot index."""
+        return self._current_slot
 
     # =========================================================================
     # Learn mode
@@ -355,9 +442,14 @@ class SchwungDeviceControl(ControlSurface):
         if 'pages' not in device_entry:
             device_entry['pages'] = []
         pages = device_entry['pages']
+        # If on empty slot (current_page == -1), create a page for this slot
+        if self._current_page < 0:
+            new_page = {'name': '{}'.format(self._current_slot + 1), 'slot': self._current_slot, 'knobs': {}}
+            pages.append(new_page)
+            self._current_page = len(pages) - 1
         # Auto-create pages up to current_page
         while len(pages) <= self._current_page:
-            pages.append({'name': '{}'.format(len(pages) + 1), 'knobs': {}})
+            pages.append({'name': '{}'.format(len(pages) + 1), 'slot': self._current_slot, 'knobs': {}})
         pages[self._current_page]['knobs'][str(knob_idx)] = {
             'param_index': param_index,
             'param_name': param.name,
@@ -404,6 +496,50 @@ class SchwungDeviceControl(ControlSurface):
         # Send updated param info (empty)
         self._send_sysex(CMD_PARAM_INFO, [knob_idx] + self._encode_string('', MAX_PARAM_NAME_LEN) + [0])
         self._send_param_value(knob_idx)
+
+    def _cleanup_provisional_page(self):
+        """Remove current page if it has no knob bindings (provisional from learn mode)."""
+        device = self._selected_device
+        if device is None:
+            return
+        device_hash = self._get_device_hash(device)
+        pages = self._bindings.get(device_hash, {}).get('pages', [])
+        if self._current_page < 0 or self._current_page >= len(pages):
+            return
+        page = pages[self._current_page]
+        if page.get('knobs', {}):
+            return  # has bindings, keep it
+
+        current_slot = self._get_current_slot(device_hash)
+        pages_in_slot = self._get_pages_for_slot(device_hash, current_slot)
+
+        # Only remove if there are other pages on this slot to fall back to
+        if len(pages_in_slot) <= 1:
+            return
+
+        removed_idx = self._current_page
+        pages.pop(removed_idx)
+
+        # Update slot_page_memory: adjust any indices >= removed_idx
+        mem = self._slot_page_memory.get(device_hash, {})
+        for slot, pidx in list(mem.items()):
+            if pidx == removed_idx:
+                del mem[slot]
+            elif pidx > removed_idx:
+                mem[slot] = pidx - 1
+
+        # Switch to previous sub-page on this slot
+        pages_in_slot = self._get_pages_for_slot(device_hash, current_slot)
+        if pages_in_slot:
+            self._current_page = pages_in_slot[-1]
+        else:
+            self._current_page = 0
+
+        self._save_bindings()
+        self._apply_bindings_for_device(device)
+        if self._connected:
+            self._send_full_state()
+        self.log_message('SchwungDeviceControl: removed empty provisional page')
 
     # =========================================================================
     # Parameter binding and value listeners
@@ -478,7 +614,7 @@ class SchwungDeviceControl(ControlSurface):
         device_entry = self._bindings.get(device_hash, {})
         pages = device_entry.get('pages', [])
 
-        if self._current_page < len(pages):
+        if 0 <= self._current_page < len(pages):
             page = pages[self._current_page]
             for knob_key, binding in page.get('knobs', {}).items():
                 knob_idx = int(knob_key)
@@ -491,7 +627,7 @@ class SchwungDeviceControl(ControlSurface):
         """Get short_name from binding for display, falling back to the full param name."""
         device_entry = self._bindings.get(device_hash, {})
         pages = device_entry.get('pages', [])
-        if self._current_page < len(pages):
+        if 0 <= self._current_page < len(pages):
             binding = pages[self._current_page].get('knobs', {}).get(str(knob_idx))
             if binding:
                 return binding.get('short_name', fallback)
@@ -499,16 +635,21 @@ class SchwungDeviceControl(ControlSurface):
 
     def _resolve_param(self, device, binding):
         """Resolve a binding to a live parameter, using name then falling back to index."""
-        param_name = binding['param_name']
-        param_index = binding['param_index']
+        param_name = binding.get('param_name')
+        param_index = binding.get('param_index')
 
         # Try name match first
-        for p in device.parameters:
-            if p.name == param_name:
-                return p
+        if param_name:
+            matches = [p for p in device.parameters if p.name == param_name]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1 and param_index is not None:
+                # Ambiguous name — use index to disambiguate
+                if param_index < len(device.parameters):
+                    return device.parameters[param_index]
 
         # Fall back to index
-        if param_index < len(device.parameters):
+        if param_index is not None and param_index < len(device.parameters):
             return device.parameters[param_index]
 
         return None
@@ -533,21 +674,33 @@ class SchwungDeviceControl(ControlSurface):
         self._send_sysex(CMD_DEVICE_INDEX, [min(127, self._device_index)])
         sleep(SYSEX_DELAY)
 
-        # Page info
+        # Page info (slot-based)
         device_hash = self._get_device_hash(device)
         device_entry = self._bindings.get(device_hash, {})
         pages = device_entry.get('pages', [])
-        page_count = max(1, len(pages))
-        self._send_sysex(CMD_PAGE_INFO, [self._current_page, page_count])
+        current_slot = self._get_current_slot(device_hash)
+        slot_count = max(1, self._get_slot_count(device_hash))
+        self._send_sysex(CMD_PAGE_INFO, [current_slot, slot_count])
         sleep(SYSEX_DELAY)
 
-        # Page names
-        for i in range(page_count):
-            if i < len(pages):
-                name = pages[i].get('name', '{}'.format(i + 1))
+        # Page names (one per slot, showing active sub-page name)
+        for slot in range(slot_count):
+            slot_pages = self._get_pages_for_slot(device_hash, slot)
+            if slot_pages:
+                if slot == current_slot and self._current_page >= 0:
+                    active_page = self._current_page
+                elif slot == current_slot:
+                    active_page = slot_pages[0]  # on empty slot, shouldn't reach here
+                else:
+                    remembered = self._slot_page_memory.get(device_hash, {}).get(slot)
+                    if remembered is not None and remembered in slot_pages:
+                        active_page = remembered
+                    else:
+                        active_page = slot_pages[0]
+                name = pages[active_page].get('name', '{}'.format(slot + 1))
             else:
-                name = '{}'.format(i + 1)
-            self._send_sysex(CMD_PAGE_NAME, [i] + self._encode_string(name, MAX_PARAM_NAME_LEN) + [0])
+                name = '{}'.format(slot + 1)
+            self._send_sysex(CMD_PAGE_NAME, [slot] + self._encode_string(name, MAX_PARAM_NAME_LEN) + [0])
             sleep(SYSEX_DELAY)
 
         # Parameter names (use short_name from binding if available)
@@ -660,9 +813,15 @@ class SchwungDeviceControl(ControlSurface):
                         'pages': [{'name': '1', 'knobs': entry}]
                     }
                     migrated = True
+            # Migrate pages without slot field
+            for device_hash, entry in self._bindings.items():
+                for i, page in enumerate(entry.get('pages', [])):
+                    if 'slot' not in page:
+                        page['slot'] = i
+                        migrated = True
             if migrated:
                 self._save_bindings()
-                self.log_message('SchwungDeviceControl: migrated bindings to pages format')
+                self.log_message('SchwungDeviceControl: migrated bindings format')
             self.log_message('SchwungDeviceControl: loaded {} device bindings'.format(
                 len(self._bindings)))
         except Exception as e:

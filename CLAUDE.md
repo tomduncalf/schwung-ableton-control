@@ -30,6 +30,73 @@ src/ui.js                           ableton_remote_script/schwung_device.py
 - `scripts/build.sh` — Package module tarball
 - `scripts/install.sh` — Deploy to Move via SSH
 
+## Data Model
+
+### bindings.json
+
+Persisted at `ableton_remote_script/bindings.json`. Keyed by device hash (SHA1 of `class_name:device_name`).
+
+```json
+{
+  "device_hash": {
+    "pages": [
+      {"name": "Filter", "slot": 0, "knobs": {"0": {"param_index": 5, "param_name": "Cutoff", "short_name": "Cut"}}},
+      {"name": "LFO", "slot": 1, "knobs": {...}},
+      {"name": "Env", "slot": 1, "knobs": {...}}
+    ]
+  }
+}
+```
+
+- Each page has a `slot` (0-7) indicating which step button it lives on
+- Multiple pages can share a slot — pressing the step button cycles through them
+- `param_name` is used for resolution (name match first, then `param_index` fallback)
+- `short_name` is what's displayed on Move (editable in JSON, defaults to param_name)
+
+### Slots vs Pages
+
+**Slots** = step buttons (0-7), what Move sees. **Pages** = entries in the pages array, what Ableton manages internally. Move only knows about slots — Ableton translates.
+
+- `_current_page`: index into the pages array (Ableton internal)
+- `_slot_page_memory`: `{device_hash: {slot: page_index}}` — remembers last sub-page per slot
+- CMD_PAGE_INFO sends `[current_slot, slot_count]` (not page index/count)
+- CMD_PAGE_NAME sends the active sub-page's name per slot position
+
+### State (Ableton side — schwung_device.py)
+
+- `_selected_device` / `_device_list` / `_device_index`: current device context
+- `_current_page`: active page array index (reset to 0 on device change)
+- `_active_params[0..7]`: live parameter objects bound to each knob
+- `_active_listeners[0..7]`: value change listeners for Live→Move sync
+- `_learn_mode`: whether learn mode is active
+- `_slot_page_memory`: last-visited page per slot per device (runtime only, not persisted)
+- `_bindings`: the full bindings dict, loaded from/saved to bindings.json
+
+### State (Move side — ui.js)
+
+- `currentPage` / `pageCount` / `pageNames[0..7]`: slot-space values received from Ableton
+- `paramNames[0..7]` / `paramValues[0..7]`: current knob labels and values
+- `touchStack`: ordered list of currently touched knobs (for multi-touch)
+- `connected` / `heartbeatTimer`: connection state (720-tick timeout)
+
+## Input Mapping (Move side)
+
+- **Knobs (CC 71-78, ch16):** parameter control with acceleration + discrete step handling
+- **Knob touch (notes 0-7):** select knob for learn mode, show value overlay
+- **Step buttons (notes 16-23):** switch slot, always sends CMD_PAGE_CHANGE to Ableton
+- **Menu (CC 118):** toggle learn mode on Move side (also sends CMD_LEARN_START/STOP)
+- **Left/Right (CC 119-120):** device navigation
+- **Back (CC 120):** exit module
+
+## Learn Mode Flow
+
+1. User presses Menu → learn mode on (both sides notified)
+2. User touches knob on Move → CMD_LEARN_KNOB sent with knob index
+3. Ableton grabs `song().view.selected_parameter`, stores binding on current page
+4. Ableton sends CMD_LEARN_ACK with param name → Move updates display
+5. Cycling past last sub-page on a slot creates a provisional empty page
+6. On learn mode exit, provisional pages with no bindings are discarded
+
 ## Build & Deploy
 
 ```bash

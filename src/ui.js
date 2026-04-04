@@ -72,6 +72,8 @@ const CMD_PARAM_STEPS = 0x0c; // Live -> Move: 8 step counts (0=continuous)
 
 // SysEx commands: Move -> Live
 const CMD_HELLO = 0x10;
+const CMD_LEARN_START = 0x11;
+const CMD_LEARN_STOP = 0x12;
 const CMD_LEARN_KNOB = 0x13;
 const CMD_KNOB_VALUE = 0x14; // Move -> Live: knob_idx, value (0-127)
 const CMD_NAV_DEVICE = 0x17; // Move -> Live: direction (-1 or +1 as 0x00/0x01)
@@ -409,6 +411,7 @@ function handleInternalCC(cc, value) {
   if (cc === MoveBack && value > 63) {
     if (learnMode) {
       learnMode = false;
+      sendCommand(CMD_LEARN_STOP, []);
       needsRedraw = true;
       return;
     }
@@ -423,7 +426,7 @@ function handleInternalCC(cc, value) {
   // Menu button - toggle learn mode
   if (cc === MoveMenu && value > 63) {
     learnMode = !learnMode;
-    sendCC(CC_LEARN_TOGGLE, learnMode ? 127 : 0);
+    sendCommand(learnMode ? CMD_LEARN_START : CMD_LEARN_STOP, []);
     needsRedraw = true;
     return;
   }
@@ -519,15 +522,10 @@ function handleInternalNoteOn(note, velocity) {
     return;
   }
 
-  // Step buttons 1-8 (notes 16-23) — switch page
+  // Step buttons 1-8 (notes 16-23) — switch slot (Ableton resolves to page)
   if (note >= STEP_NOTE_BASE && note < STEP_NOTE_BASE + 8) {
-    const pageIdx = note - STEP_NOTE_BASE;
-    if (pageIdx !== currentPage) {
-      currentPage = pageIdx;
-      sendCommand(CMD_PAGE_CHANGE, [pageIdx]);
-      updateStepLEDs();
-      needsRedraw = true;
-    }
+    const slotIdx = note - STEP_NOTE_BASE;
+    sendCommand(CMD_PAGE_CHANGE, [slotIdx]);
     return;
   }
 }
