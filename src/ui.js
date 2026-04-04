@@ -5,16 +5,42 @@
  * Communicates with SchwungDeviceControl Remote Script via MIDI cable 2.
  */
 
-import { setButtonLED, setLED, clearAllLEDs } from '/data/UserData/move-anything/shared/input_filter.mjs';
-import { decodeDelta, decodeAcceleratedDelta } from '/data/UserData/move-anything/shared/input_filter.mjs';
 import {
-    MoveBack, MoveMenu, MoveShift, MoveUp, MoveDown, MoveLeft, MoveRight,
-    MoveKnob1, MoveKnob2, MoveKnob3, MoveKnob4,
-    MoveKnob5, MoveKnob6, MoveKnob7, MoveKnob8,
-    MoveMainKnob, MoveMainButton,
-    White, Black, BrightGreen, BrightRed, Cyan, DarkGrey, WhiteLedBright
-} from '/data/UserData/move-anything/shared/constants.mjs';
-import * as os from 'os';
+  setButtonLED,
+  setLED,
+  clearAllLEDs,
+} from "/data/UserData/move-anything/shared/input_filter.mjs";
+import {
+  decodeDelta,
+  decodeAcceleratedDelta,
+} from "/data/UserData/move-anything/shared/input_filter.mjs";
+import {
+  MoveBack,
+  MoveMenu,
+  MoveShift,
+  MoveUp,
+  MoveDown,
+  MoveLeft,
+  MoveRight,
+  MoveKnob1,
+  MoveKnob2,
+  MoveKnob3,
+  MoveKnob4,
+  MoveKnob5,
+  MoveKnob6,
+  MoveKnob7,
+  MoveKnob8,
+  MoveMainKnob,
+  MoveMainButton,
+  White,
+  Black,
+  BrightGreen,
+  BrightRed,
+  Cyan,
+  DarkGrey,
+  WhiteLedBright,
+} from "/data/UserData/move-anything/shared/constants.mjs";
+import * as os from "os";
 
 /* ============================================================================
  * Constants
@@ -23,7 +49,7 @@ import * as os from 'os';
 const SCREEN_WIDTH = 128;
 const SCREEN_HEIGHT = 64;
 const CABLE = 2;
-const MIDI_CHANNEL = 0x0F; // channel 16
+const MIDI_CHANNEL = 0x0f; // channel 16
 
 // Knob CCs (same as Move hardware knobs)
 const KNOB_CCS = [71, 72, 73, 74, 75, 76, 77, 78];
@@ -31,30 +57,31 @@ const KNOB_CCS = [71, 72, 73, 74, 75, 76, 77, 78];
 // Navigation CCs sent to Ableton
 const CC_DEVICE_LEFT = 80;
 const CC_DEVICE_RIGHT = 81;
-const CC_BANK_UP = 82;
-const CC_BANK_DOWN = 83;
 const CC_LEARN_TOGGLE = 84;
 
 // SysEx protocol
-const SYSEX_HEADER = [0xF0, 0x00, 0x7D, 0x01];
+const SYSEX_HEADER = [0xf0, 0x00, 0x7d, 0x01];
 
 // SysEx commands: Live -> Move
 const CMD_DEVICE_INFO = 0x01;
 const CMD_PARAM_INFO = 0x02;
 const CMD_DEVICE_COUNT = 0x03;
 const CMD_DEVICE_INDEX = 0x04;
-const CMD_BANK_INFO = 0x05;
+// 0x05 was CMD_BANK_INFO (removed)
 const CMD_LEARN_ACK = 0x06;
 const CMD_HEARTBEAT = 0x07;
 const CMD_ALL_VALUES = 0x08;
+const CMD_PAGE_INFO = 0x09;
+const CMD_PAGE_NAME = 0x0a;
 
 // SysEx commands: Move -> Live
 const CMD_HELLO = 0x10;
 const CMD_LEARN_KNOB = 0x13;
-const CMD_KNOB_VALUE = 0x14;  // Move -> Live: knob_idx, value (0-127)
-const CMD_NAV_DEVICE = 0x17;  // Move -> Live: direction (-1 or +1 as 0x00/0x01)
+const CMD_KNOB_VALUE = 0x14; // Move -> Live: knob_idx, value (0-127)
+const CMD_NAV_DEVICE = 0x17; // Move -> Live: direction (-1 or +1 as 0x00/0x01)
 const CMD_REQUEST_STATE = 0x15;
 const CMD_UNMAP_KNOB = 0x16;
+const CMD_PAGE_CHANGE = 0x18; // Move -> Live: pageIndex
 
 // Timing
 const HEARTBEAT_TIMEOUT_TICKS = 720; // ~3 seconds at ~240fps (tick rate is faster than expected)
@@ -71,15 +98,27 @@ let shiftHeld = false;
 let needsRedraw = true;
 let tickCount = 0;
 let touchedKnob = -1; // -1 = none, 0-7 = knob index
+let marqueeOffset = 0; // pixel scroll offset for touched knob name
+let marqueeKnob = -1; // which knob marquee is active for
+// marqueeDirection no longer used (loop mode, not bounce)
+
+// UI layout: 'A' = original (2 cols x 4 rows with bar), 'B' = compact (4 cols x 2 rows with pixel line)
+let uiLayout = "B";
 
 // Device state (from Ableton)
-let deviceName = '';
+let deviceName = "";
 let deviceIndex = 0;
 let deviceCount = 0;
-let bankIndex = 0;
-let totalBanks = 1;
-let paramNames = new Array(8).fill('');
+let paramNames = new Array(8).fill("");
 let paramValues = new Array(8).fill(0);
+
+// Page state
+let currentPage = 0;
+let pageCount = 1;
+let pageNames = ["1", "2", "3", "4", "5", "6", "7", "8"];
+
+// Step button notes (step 1-8 = notes 16-23)
+const STEP_NOTE_BASE = 16;
 
 // LED queue for progressive updates
 const ledQueue = [];
@@ -97,55 +136,53 @@ let ledsInitialized = false;
  * ============================================================================ */
 
 function sendSysEx(data) {
-    // data = [F0, ..., F7] complete SysEx message
-    let i = 0;
-    while (i < data.length) {
-        const remaining = data.length - i;
-        if (remaining > 3) {
-            // Start or continue: CIN 0x4, 3 data bytes
-            move_midi_external_send([
-                (CABLE << 4) | 0x4,
-                data[i], data[i + 1], data[i + 2]
-            ]);
-            i += 3;
-        } else if (remaining === 3) {
-            // End with 3 bytes: CIN 0x7
-            move_midi_external_send([
-                (CABLE << 4) | 0x7,
-                data[i], data[i + 1], data[i + 2]
-            ]);
-            i += 3;
-        } else if (remaining === 2) {
-            // End with 2 bytes: CIN 0x6
-            move_midi_external_send([
-                (CABLE << 4) | 0x6,
-                data[i], data[i + 1], 0
-            ]);
-            i += 2;
-        } else {
-            // End with 1 byte: CIN 0x5
-            move_midi_external_send([
-                (CABLE << 4) | 0x5,
-                data[i], 0, 0
-            ]);
-            i += 1;
-        }
+  // data = [F0, ..., F7] complete SysEx message
+  let i = 0;
+  while (i < data.length) {
+    const remaining = data.length - i;
+    if (remaining > 3) {
+      // Start or continue: CIN 0x4, 3 data bytes
+      move_midi_external_send([
+        (CABLE << 4) | 0x4,
+        data[i],
+        data[i + 1],
+        data[i + 2],
+      ]);
+      i += 3;
+    } else if (remaining === 3) {
+      // End with 3 bytes: CIN 0x7
+      move_midi_external_send([
+        (CABLE << 4) | 0x7,
+        data[i],
+        data[i + 1],
+        data[i + 2],
+      ]);
+      i += 3;
+    } else if (remaining === 2) {
+      // End with 2 bytes: CIN 0x6
+      move_midi_external_send([(CABLE << 4) | 0x6, data[i], data[i + 1], 0]);
+      i += 2;
+    } else {
+      // End with 1 byte: CIN 0x5
+      move_midi_external_send([(CABLE << 4) | 0x5, data[i], 0, 0]);
+      i += 1;
     }
+  }
 }
 
 function sendCommand(cmd, dataBytes) {
-    const msg = [...SYSEX_HEADER, cmd, ...dataBytes, 0xF7];
-    sendSysEx(msg);
+  const msg = [...SYSEX_HEADER, cmd, ...dataBytes, 0xf7];
+  sendSysEx(msg);
 }
 
 function sendCC(cc, value) {
-    const packet = [
-        (CABLE << 4) | 0x0B,  // CIN for CC
-        0xB0 | MIDI_CHANNEL,
-        cc,
-        value
-    ];
-    move_midi_external_send(packet);
+  const packet = [
+    (CABLE << 4) | 0x0b, // CIN for CC
+    0xb0 | MIDI_CHANNEL,
+    cc,
+    value,
+  ];
+  move_midi_external_send(packet);
 }
 
 /* ============================================================================
@@ -156,147 +193,167 @@ function sendCC(cc, value) {
 let sysexBuffer = null;
 
 function processMidiExternal(data) {
-    if (!data || data.length < 1) return;
-    const status = data[0] & 0xF0;
+  if (!data || data.length < 1) return;
+  const status = data[0] & 0xf0;
 
-    // SysEx start
-    if (data[0] === 0xF0) {
-        sysexBuffer = Array.from(data);
-        // Check if complete (ends with F7)
-        if (data[data.length - 1] === 0xF7) {
-            handleSysEx(sysexBuffer);
-            sysexBuffer = null;
-        }
+  // SysEx start
+  if (data[0] === 0xf0) {
+    sysexBuffer = Array.from(data);
+    // Check if complete (ends with F7)
+    if (data[data.length - 1] === 0xf7) {
+      handleSysEx(sysexBuffer);
+      sysexBuffer = null;
+    }
+    return;
+  }
+
+  // SysEx continuation
+  if (sysexBuffer !== null) {
+    for (let i = 0; i < data.length; i++) {
+      sysexBuffer.push(data[i]);
+      if (data[i] === 0xf7) {
+        handleSysEx(sysexBuffer);
+        sysexBuffer = null;
         return;
+      }
     }
+    return;
+  }
 
-    // SysEx continuation
-    if (sysexBuffer !== null) {
-        for (let i = 0; i < data.length; i++) {
-            sysexBuffer.push(data[i]);
-            if (data[i] === 0xF7) {
-                handleSysEx(sysexBuffer);
-                sysexBuffer = null;
-                return;
-            }
-        }
-        return;
-    }
-
-    // CC on our channel
-    if (status === 0xB0 && (data[0] & 0x0F) === MIDI_CHANNEL) {
-        const cc = data[1];
-        const value = data[2];
-        handleCCFromAbleton(cc, value);
-    }
+  // CC on our channel
+  if (status === 0xb0 && (data[0] & 0x0f) === MIDI_CHANNEL) {
+    const cc = data[1];
+    const value = data[2];
+    handleCCFromAbleton(cc, value);
+  }
 }
 
 function handleSysEx(msg) {
-    // Validate header: F0 00 7D 01 <cmd> ... F7
-    if (msg.length < 6) {
-        return;
-    }
-    if (msg[0] !== 0xF0 || msg[1] !== 0x00 || msg[2] !== 0x7D || msg[3] !== 0x01) {
-        return;
-    }
+  // Validate header: F0 00 7D 01 <cmd> ... F7
+  if (msg.length < 6) {
+    return;
+  }
+  if (
+    msg[0] !== 0xf0 ||
+    msg[1] !== 0x00 ||
+    msg[2] !== 0x7d ||
+    msg[3] !== 0x01
+  ) {
+    return;
+  }
 
-    const cmd = msg[4];
-    const payload = msg.slice(5, -1); // strip F7
+  const cmd = msg[4];
+  const payload = msg.slice(5, -1); // strip F7
 
-    switch (cmd) {
-        case CMD_DEVICE_INFO:
-            deviceName = decodeString(payload);
-            needsRedraw = true;
-            break;
+  switch (cmd) {
+    case CMD_DEVICE_INFO:
+      deviceName = decodeString(payload);
+      needsRedraw = true;
+      break;
 
-        case CMD_PARAM_INFO:
-            if (payload.length >= 2) {
-                const idx = payload[0];
-                if (idx >= 0 && idx < 8) {
-                    paramNames[idx] = decodeString(payload.slice(1));
-                    needsRedraw = true;
-                }
-            }
-            break;
+    case CMD_PARAM_INFO:
+      if (payload.length >= 2) {
+        const idx = payload[0];
+        if (idx >= 0 && idx < 8) {
+          paramNames[idx] = decodeString(payload.slice(1));
+          needsRedraw = true;
+        }
+      }
+      break;
 
-        case CMD_DEVICE_COUNT:
-            if (payload.length >= 1) {
-                deviceCount = payload[0];
-                updateNavLEDs();
-                needsRedraw = true;
-            }
-            break;
+    case CMD_DEVICE_COUNT:
+      if (payload.length >= 1) {
+        deviceCount = payload[0];
+        updateNavLEDs();
+        needsRedraw = true;
+      }
+      break;
 
-        case CMD_DEVICE_INDEX:
-            if (payload.length >= 1) {
-                deviceIndex = payload[0];
-                updateNavLEDs();
-                needsRedraw = true;
-            }
-            break;
+    case CMD_DEVICE_INDEX:
+      if (payload.length >= 1) {
+        deviceIndex = payload[0];
+        updateNavLEDs();
+        needsRedraw = true;
+      }
+      break;
 
-        case CMD_BANK_INFO:
-            if (payload.length >= 2) {
-                bankIndex = payload[0];
-                totalBanks = payload[1];
-                needsRedraw = true;
-            }
-            break;
+    case CMD_PAGE_INFO:
+      if (payload.length >= 2) {
+        currentPage = payload[0];
+        pageCount = payload[1];
+        updateStepLEDs();
+        needsRedraw = true;
+      }
+      break;
 
-        case CMD_LEARN_ACK:
-            if (payload.length >= 2) {
-                const idx = payload[0];
-                if (idx >= 0 && idx < 8) {
-                    paramNames[idx] = decodeString(payload.slice(1));
-                    needsRedraw = true;
-                }
-            }
-            break;
+    case CMD_PAGE_NAME:
+      if (payload.length >= 2) {
+        const pi = payload[0];
+        if (pi >= 0 && pi < 8) {
+          pageNames[pi] = decodeString(payload.slice(1));
+        }
+        needsRedraw = true;
+      }
+      break;
 
-        case CMD_HEARTBEAT:
-            connected = true;
-            heartbeatTimer = 0;
-            needsRedraw = true;
-            break;
+    case CMD_LEARN_ACK:
+      if (payload.length >= 2) {
+        const idx = payload[0];
+        if (idx >= 0 && idx < 8) {
+          paramNames[idx] = decodeString(payload.slice(1));
+          needsRedraw = true;
+        }
+      }
+      break;
 
-        case CMD_KNOB_VALUE:
-            // Single knob value update from Ableton
-            if (payload.length >= 2) {
-                const ki = payload[0];
-                if (ki >= 0 && ki < 8) {
-                    paramValues[ki] = payload[1];
-                    enqueueLED('button', KNOB_CCS[ki], valueToKnobColor(paramValues[ki], learnMode));
-                    needsRedraw = true;
-                }
-            }
-            break;
+    case CMD_HEARTBEAT:
+      connected = true;
+      heartbeatTimer = 0;
+      needsRedraw = true;
+      break;
 
-        case CMD_ALL_VALUES:
-            for (let i = 0; i < Math.min(8, payload.length); i++) {
-                paramValues[i] = payload[i];
-            }
-            updateKnobLEDs();
-            needsRedraw = true;
-            break;
-    }
+    case CMD_KNOB_VALUE:
+      // Single knob value update from Ableton
+      if (payload.length >= 2) {
+        const ki = payload[0];
+        if (ki >= 0 && ki < 8) {
+          paramValues[ki] = payload[1];
+          enqueueLED(
+            "button",
+            KNOB_CCS[ki],
+            valueToKnobColor(paramValues[ki], learnMode),
+          );
+          needsRedraw = true;
+        }
+      }
+      break;
+
+    case CMD_ALL_VALUES:
+      for (let i = 0; i < Math.min(8, payload.length); i++) {
+        paramValues[i] = payload[i];
+      }
+      updateKnobLEDs();
+      needsRedraw = true;
+      break;
+  }
 }
 
 function handleCCFromAbleton(cc, value) {
-    // Parameter value feedback from Ableton
-    const idx = KNOB_CCS.indexOf(cc);
-    if (idx >= 0) {
-        paramValues[idx] = value;
-        needsRedraw = true;
-    }
+  // Parameter value feedback from Ableton
+  const idx = KNOB_CCS.indexOf(cc);
+  if (idx >= 0) {
+    paramValues[idx] = value;
+    needsRedraw = true;
+  }
 }
 
 function decodeString(bytes) {
-    let s = '';
-    for (let i = 0; i < bytes.length; i++) {
-        if (bytes[i] === 0) break;
-        s += String.fromCharCode(bytes[i] & 0x7F);
-    }
-    return s;
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] === 0) break;
+    s += String.fromCharCode(bytes[i] & 0x7f);
+  }
+  return s;
 }
 
 /* ============================================================================
@@ -304,111 +361,123 @@ function decodeString(bytes) {
  * ============================================================================ */
 
 function handleMidiInternal(data) {
-    if (!data || data.length < 3) return;
+  if (!data || data.length < 3) return;
 
-    const status = data[0] & 0xF0;
-    const d1 = data[1];
-    const d2 = data[2];
+  const status = data[0] & 0xf0;
+  const d1 = data[1];
+  const d2 = data[2];
 
-    if (status === 0xB0) {
-        handleInternalCC(d1, d2);
-    } else if (status === 0x90 && d2 > 0) {
-        handleInternalNoteOn(d1, d2);
-    } else if ((status === 0x80) || (status === 0x90 && d2 === 0)) {
-        handleInternalNoteOff(d1);
-    }
+  if (status === 0xb0) {
+    handleInternalCC(d1, d2);
+  } else if (status === 0x90 && d2 > 0) {
+    handleInternalNoteOn(d1, d2);
+  } else if (status === 0x80 || (status === 0x90 && d2 === 0)) {
+    handleInternalNoteOff(d1);
+  }
 }
 
 function handleInternalCC(cc, value) {
-    // Shift state
-    if (cc === MoveShift) {
-        shiftHeld = value > 63;
-        return;
-    }
+  // Shift state
+  if (cc === MoveShift) {
+    shiftHeld = value > 63;
+    return;
+  }
 
-    // Back button
-    if (cc === MoveBack && value > 63) {
-        if (learnMode) {
-            learnMode = false;
-            needsRedraw = true;
-            return;
-        }
-        clearAllLEDs();
-        host_exit_module();
-        return;
+  // Back button
+  if (cc === MoveBack && value > 63) {
+    if (learnMode) {
+      learnMode = false;
+      needsRedraw = true;
+      return;
     }
+    clearAllLEDs();
+    host_exit_module();
+    return;
+  }
 
-    // Menu button - toggle learn mode
-    if (cc === MoveMenu && value > 63) {
-        learnMode = !learnMode;
-        sendCC(CC_LEARN_TOGGLE, learnMode ? 127 : 0);
-        needsRedraw = true;
-        return;
-    }
+  // Menu button - toggle learn mode
+  if (cc === MoveMenu && value > 63) {
+    learnMode = !learnMode;
+    sendCC(CC_LEARN_TOGGLE, learnMode ? 127 : 0);
+    needsRedraw = true;
+    return;
+  }
 
-    // Arrow keys - device/bank navigation
-    if (cc === MoveLeft && value > 63) {
-        sendCommand(CMD_NAV_DEVICE, [0x00]); // left = -1
-        return;
-    }
-    if (cc === MoveRight && value > 63) {
-        sendCommand(CMD_NAV_DEVICE, [0x01]); // right = +1
-        return;
-    }
-    if (cc === MoveUp && value > 63) {
-        sendCC(CC_BANK_UP, 127);
-        return;
-    }
-    if (cc === MoveDown && value > 63) {
-        sendCC(CC_BANK_DOWN, 127);
-        return;
-    }
+  // Arrow keys - device navigation
+  if (cc === MoveLeft && value > 63) {
+    sendCommand(CMD_NAV_DEVICE, [0x00]); // left = -1
+    return;
+  }
+  if (cc === MoveRight && value > 63) {
+    sendCommand(CMD_NAV_DEVICE, [0x01]); // right = +1
+    return;
+  }
+  // Up/Down arrows currently unused (banks removed, pages use step buttons)
 
-    // Knob turns
-    const knobIdx = KNOB_CCS.indexOf(cc);
-    if (knobIdx >= 0) {
-        handleKnobTurn(knobIdx, value);
-        return;
-    }
+  // Knob turns
+  const knobIdx = KNOB_CCS.indexOf(cc);
+  if (knobIdx >= 0) {
+    handleKnobTurn(knobIdx, value);
+    return;
+  }
 }
 
 function handleKnobTurn(idx, rawValue) {
-    if (!connected) return;
+  if (!connected) return;
 
-    if (learnMode) {
-        // In learn mode, twist a knob to bind it
-        sendCommand(CMD_LEARN_KNOB, [idx]);
-        return;
-    }
+  if (learnMode) {
+    // In learn mode, twist a knob to bind it
+    sendCommand(CMD_LEARN_KNOB, [idx]);
+    return;
+  }
 
-    const rawDelta = decodeAcceleratedDelta(rawValue, idx);
-    const delta = Math.round(rawDelta * 0.2) || (rawDelta > 0 ? 1 : rawDelta < 0 ? -1 : 0);
-    paramValues[idx] = Math.max(0, Math.min(127, paramValues[idx] + delta));
+  const rawDelta = decodeAcceleratedDelta(rawValue, idx);
+  const delta =
+    Math.round(rawDelta * 0.2) || (rawDelta > 0 ? 1 : rawDelta < 0 ? -1 : 0);
+  paramValues[idx] = Math.max(0, Math.min(127, paramValues[idx] + delta));
 
-    // Send absolute value to Ableton via SysEx (CC doesn't pass through Standalone Port)
-    sendCommand(CMD_KNOB_VALUE, [idx, paramValues[idx]]);
+  // Send absolute value to Ableton via SysEx (CC doesn't pass through Standalone Port)
+  sendCommand(CMD_KNOB_VALUE, [idx, paramValues[idx]]);
 
-    // Update this knob's LED immediately
-    const colour = valueToKnobColor(paramValues[idx], learnMode);
-    enqueueLED('button', KNOB_CCS[idx], colour);
+  // Update this knob's LED immediately
+  const colour = valueToKnobColor(paramValues[idx], learnMode);
+  enqueueLED("button", KNOB_CCS[idx], colour);
 
-    needsRedraw = true;
+  needsRedraw = true;
 }
 
 function handleInternalNoteOn(note, velocity) {
-    // Capacitive knob touch (notes 0-7)
-    if (note < 8) {
-        touchedKnob = note;
-        needsRedraw = true;
-        return;
+  // Capacitive knob touch (notes 0-7)
+  if (note < 8) {
+    touchedKnob = note;
+    if (marqueeKnob !== note) {
+      marqueeKnob = note;
+      marqueeOffset = 0;
     }
+    needsRedraw = true;
+    return;
+  }
+
+  // Step buttons 1-8 (notes 16-23) — switch page
+  if (note >= STEP_NOTE_BASE && note < STEP_NOTE_BASE + 8) {
+    const pageIdx = note - STEP_NOTE_BASE;
+    if (pageIdx !== currentPage) {
+      currentPage = pageIdx;
+      sendCommand(CMD_PAGE_CHANGE, [pageIdx]);
+      updateStepLEDs();
+      needsRedraw = true;
+    }
+    return;
+  }
 }
 
 function handleInternalNoteOff(note) {
-    if (note < 8 && touchedKnob === note) {
-        touchedKnob = -1;
-        needsRedraw = true;
-    }
+  if (note < 8 && touchedKnob === note) {
+    touchedKnob = -1;
+    marqueeKnob = -1;
+    marqueeOffset = 0;
+    needsRedraw = true;
+  }
 }
 
 /* ============================================================================
@@ -416,120 +485,197 @@ function handleInternalNoteOff(note) {
  * ============================================================================ */
 
 function drawScreen() {
-    clear_screen();
+  clear_screen();
 
-    if (!connected) {
-        drawDisconnected();
-        return;
-    }
+  if (!connected) {
+    drawDisconnected();
+    return;
+  }
 
-    drawHeader();
-    drawParams();
-    drawFooter();
+  drawParams();
+  drawFooter();
 }
 
 function drawDisconnected() {
-    const msg = 'Waiting for Ableton...';
-    const w = text_width(msg);
-    print(Math.floor((SCREEN_WIDTH - w) / 2), 24, msg, 1);
+  const msg = "Waiting for Ableton...";
+  const w = text_width(msg);
+  print(Math.floor((SCREEN_WIDTH - w) / 2), 24, msg, 1);
 
-    // Animated dots
-    const dots = '.'.repeat((Math.floor(tickCount / 30) % 3) + 1);
-    const dotsW = text_width(dots);
-    print(Math.floor((SCREEN_WIDTH - dotsW) / 2), 36, dots, 1);
+  // Animated dots
+  const dots = ".".repeat((Math.floor(tickCount / 30) % 3) + 1);
+  const dotsW = text_width(dots);
+  print(Math.floor((SCREEN_WIDTH - dotsW) / 2), 36, dots, 1);
 }
 
 function drawHeader() {
-    // Device name (left) and index (right)
-    const name = deviceName || 'No Device';
-    print(1, 1, name, 1);
+  // Device name (left) and index (right)
+  const name = deviceName || "No Device";
+  print(1, 1, name, 1);
 
-    if (deviceCount > 0) {
-        const idx = `${deviceIndex + 1}/${deviceCount}`;
-        const w = text_width(idx);
-        print(SCREEN_WIDTH - w - 1, 1, idx, 1);
-    }
+  if (deviceCount > 0) {
+    const idx = `${deviceIndex + 1}/${deviceCount}`;
+    const w = text_width(idx);
+    print(SCREEN_WIDTH - w - 1, 1, idx, 1);
+  }
 
-    // Separator line
-    draw_rect(0, 10, SCREEN_WIDTH, 1, 1);
+  // Separator line
+  draw_rect(0, 10, SCREEN_WIDTH, 1, 1);
 }
 
 function drawParams() {
-    // Two-column layout: knobs 1-4 left, 5-8 right
-    const colWidth = 63;
-    const startY = 13;
-    const rowHeight = 10;
+  if (uiLayout === "B") {
+    drawParamsCompact();
+    drawPageTabs();
+  } else {
+    drawParamsClassic();
+  }
+}
 
-    for (let i = 0; i < 8; i++) {
-        const col = i < 4 ? 0 : 1;
-        const row = i % 4;
-        const x = col * (colWidth + 2);
-        const y = startY + row * rowHeight;
+// Layout A: 2 columns x 4 rows, name + value bar side by side
+function drawParamsClassic() {
+  const colWidth = 63;
+  const startY = 1;
+  const rowHeight = 10;
 
-        const name = paramNames[i] || '';
-        const value = paramValues[i];
-        const touched = (touchedKnob === i);
+  for (let i = 0; i < 8; i++) {
+    const col = i < 4 ? 0 : 1;
+    const row = i % 4;
+    const x = col * (colWidth + 2);
+    const y = startY + row * rowHeight;
 
-        if (touched && name) {
-            // Inverted: white background, black text
-            fill_rect(x, y - 1, colWidth, rowHeight, 1);
-        }
+    const name = paramNames[i] || "";
+    const value = paramValues[i];
+    const touched = touchedKnob === i;
 
-        if (name) {
-            const fg = touched ? 0 : 1;
-            let displayName = name.length > 8 ? name.substring(0, 7) + '.' : name;
-            print(x + 1, y, displayName, fg, 'small');
-
-            // Value bar
-            const barX = x + 44;
-            const barW = 18;
-            const barH = 5;
-            const barY = y + 1;
-            const fillW = Math.round((value / 127) * barW);
-
-            // When touched: outline black, empty part black, filled part white (visible)
-            // When normal: outline white, filled part white
-            draw_rect(barX, barY, barW, barH, fg);
-            if (touched) {
-                // Clear the bar area to black first, then draw fill in white
-                fill_rect(barX, barY, barW, barH, 0);
-                if (fillW > 0) {
-                    fill_rect(barX, barY, fillW, barH, 1);
-                }
-                draw_rect(barX, barY, barW, barH, 0);
-            } else {
-                if (fillW > 0) {
-                    fill_rect(barX, barY, fillW, barH, 1);
-                }
-            }
-        }
+    if (touched && name) {
+      fill_rect(x, y - 1, colWidth, rowHeight, 1);
     }
+
+    if (name) {
+      const fg = touched ? 0 : 1;
+      let displayName = name.length > 8 ? name.substring(0, 7) + "." : name;
+      print(x + 1, y, displayName, fg);
+
+      const barX = x + 44;
+      const barW = 18;
+      const barH = 5;
+      const barY = y + 1;
+      const fillW = Math.round((value / 127) * barW);
+
+      draw_rect(barX, barY, barW, barH, fg);
+      if (touched) {
+        fill_rect(barX, barY, barW, barH, 0);
+        if (fillW > 0) {
+          fill_rect(barX, barY, fillW, barH, 1);
+        }
+        draw_rect(barX, barY, barW, barH, 0);
+      } else {
+        if (fillW > 0) {
+          fill_rect(barX, barY, fillW, barH, 1);
+        }
+      }
+    }
+  }
+}
+
+// Layout B: 4 columns x 2 rows, name above, single pixel row for value
+function drawParamsCompact() {
+  const colW = 31;
+  const startY = 0;
+  const rowHeight = 14;
+
+  for (let i = 0; i < 8; i++) {
+    const col = i % 4;
+    const row = Math.floor(i / 4);
+    const x = col * (colW + 1);
+    const y = startY + row * rowHeight;
+
+    const name = paramNames[i] || "";
+    const value = paramValues[i];
+    const touched = touchedKnob === i;
+
+    if (!name) continue;
+
+    // Clip all drawing to this column
+    set_clip_rect(x, y - 1, colW, 10);
+
+    if (touched) {
+      const nameW = text_width(name);
+      const maxScroll = nameW - (colW - 4);
+      const scrollX =
+        maxScroll > 0 ? Math.max(0, Math.min(marqueeOffset, maxScroll)) : 0;
+      fill_rect(x, y - 1, colW, 9, 1);
+      print(x + 1 - scrollX, y, name, 0);
+    } else {
+      fill_rect(x, y - 1, colW, 9, 0);
+      print(x + 1, y, name, 1);
+    }
+
+    // Single pixel row for value
+    const barY = y + 8;
+    const barW = colW - 1;
+    const fillW = Math.round((value / 127) * barW);
+    if (fillW > 0) {
+      fill_rect(x, barY, fillW, 1, 1);
+    }
+
+    clear_clip_rect();
+  }
+}
+
+function drawPageTabs() {
+  const tabY = 30;
+  const tabH = 10;
+  const colW = 31;
+
+  for (let i = 0; i < 8; i++) {
+    const col = i % 4;
+    const row = Math.floor(i / 4);
+    const x = col * (colW + 1);
+    const y = tabY + row * tabH;
+
+    const hasControls = i < pageCount;
+
+    if (i === currentPage) {
+      // Active page: always render inverted block
+      fill_rect(x, y, colW, tabH - 1, 1);
+      if (hasControls) {
+        const name = pageNames[i] || `${i + 1}`;
+        const maxChars = Math.max(1, Math.floor((colW - 3) / 6));
+        const display = name.length > maxChars ? name.substring(0, maxChars) : name;
+        print(x + 1, y + 1, display, 0);
+      }
+    } else if (hasControls) {
+      const name = pageNames[i] || `${i + 1}`;
+      const maxChars = Math.max(1, Math.floor((colW - 3) / 6));
+      const display = name.length > maxChars ? name.substring(0, maxChars) : name;
+      print(x + 1, y + 1, display, 1);
+    }
+  }
 }
 
 function drawFooter() {
-    // Separator line
-    draw_rect(0, 53, SCREEN_WIDTH, 1, 1);
+  // Separator line
+  draw_rect(0, 53, SCREEN_WIDTH, 1, 1);
 
-    // Bank info (left)
-    if (totalBanks > 1) {
-        print(1, 56, `Bank ${bankIndex + 1}/${totalBanks}`, 1, 'small');
-    }
+  // Device name (left) with index
+  const name = deviceName || "No Device";
+  const idx = deviceCount > 0 ? ` ${deviceIndex + 1}/${deviceCount}` : "";
+  print(1, 56, name + idx, 1);
 
-    // Learn mode indicator (right)
-    if (learnMode) {
-        const learnText = 'LEARN';
-        // Blink effect
-        if (Math.floor(tickCount / 15) % 2 === 0) {
-            const w = text_width(learnText, 'small');
-            fill_rect(SCREEN_WIDTH - w - 4, 55, w + 3, 9, 1);
-            print(SCREEN_WIDTH - w - 2, 56, learnText, 0, 'small');
-        } else {
-            const w = text_width(learnText, 'small');
-            print(SCREEN_WIDTH - w - 2, 56, learnText, 1, 'small');
-        }
+  // Learn mode indicator (right)
+  if (learnMode) {
+    const learnText = "LEARN";
+    // Blink effect
+    if (Math.floor(tickCount / 15) % 2 === 0) {
+      const w = text_width(learnText);
+      fill_rect(SCREEN_WIDTH - w - 4, 55, w + 3, 9, 1);
+      print(SCREEN_WIDTH - w - 2, 56, learnText, 0);
     } else {
-        print(SCREEN_WIDTH - 40, 56, 'Menu:Learn', 1, 'small');
+      const w = text_width(learnText);
+      print(SCREEN_WIDTH - w - 2, 56, learnText, 1);
     }
+  }
 }
 
 /* ============================================================================
@@ -537,70 +683,81 @@ function drawFooter() {
  * ============================================================================ */
 
 function enqueueLED(type, id, colour, force = false) {
-    // Replace existing entry for same LED to avoid queue buildup
-    for (let i = 0; i < ledQueue.length; i++) {
-        if (ledQueue[i].type === type && ledQueue[i].id === id) {
-            ledQueue[i].colour = colour;
-            ledQueue[i].force = force || ledQueue[i].force;
-            return;
-        }
+  // Replace existing entry for same LED to avoid queue buildup
+  for (let i = 0; i < ledQueue.length; i++) {
+    if (ledQueue[i].type === type && ledQueue[i].id === id) {
+      ledQueue[i].colour = colour;
+      ledQueue[i].force = force || ledQueue[i].force;
+      return;
     }
-    ledQueue.push({ type, id, colour, force });
+  }
+  ledQueue.push({ type, id, colour, force });
 }
 
 function flushLEDQueue() {
-    const count = Math.min(LED_MSGS_PER_TICK, ledQueue.length);
-    for (let i = 0; i < count; i++) {
-        const msg = ledQueue.shift();
-        if (msg.type === 'pad') {
-            setLED(msg.id, msg.colour, msg.force);
-        } else {
-            setButtonLED(msg.id, msg.colour, msg.force);
-        }
+  const count = Math.min(LED_MSGS_PER_TICK, ledQueue.length);
+  for (let i = 0; i < count; i++) {
+    const msg = ledQueue.shift();
+    if (msg.type === "pad") {
+      setLED(msg.id, msg.colour, msg.force);
+    } else {
+      setButtonLED(msg.id, msg.colour, msg.force);
     }
+  }
 }
 
 function initLEDs() {
-    // Knob LEDs off
-    for (let i = 0; i < 8; i++) {
-        enqueueLED('button', KNOB_CCS[i], Black);
-    }
-    // Nav button LEDs
-    enqueueLED('button', MoveMenu, WhiteLedBright);
-    enqueueLED('button', MoveBack, WhiteLedBright);
-    enqueueLED('button', MoveUp, DarkGrey);
-    enqueueLED('button', MoveDown, DarkGrey);
-    updateNavLEDs();
-    ledsInitialized = true;
+  // Knob LEDs off
+  for (let i = 0; i < 8; i++) {
+    enqueueLED("button", KNOB_CCS[i], Black);
+  }
+  // Nav button LEDs
+  enqueueLED("button", MoveMenu, WhiteLedBright);
+  enqueueLED("button", MoveBack, WhiteLedBright);
+  updateNavLEDs();
+  updateStepLEDs();
+  ledsInitialized = true;
 }
 
 function updateNavLEDs() {
-    const hasNav = deviceCount > 1;
-    enqueueLED('button', MoveLeft, hasNav ? WhiteLedBright : Black, true);
-    enqueueLED('button', MoveRight, hasNav ? WhiteLedBright : Black, true);
+  const hasNav = deviceCount > 1;
+  enqueueLED("button", MoveLeft, hasNav ? WhiteLedBright : Black, true);
+  enqueueLED("button", MoveRight, hasNav ? WhiteLedBright : Black, true);
 }
-
 
 // Color sweep from dim to bright for knob value display
 const knobColorSweep = [Black, 117, 124, 119, 123, 118, 121, 122, White];
 const learnColorSweep = [Black, 5, 5, 5, 5, 5, 5, 5, Cyan]; // cyan sweep
 
 function valueToKnobColor(value, isLearn) {
-    const sweep = isLearn ? learnColorSweep : knobColorSweep;
-    const level = Math.min(value, 127) / 127;
-    const index = Math.round(level * (sweep.length - 1));
-    return sweep[index];
+  const sweep = isLearn ? learnColorSweep : knobColorSweep;
+  const level = Math.min(value, 127) / 127;
+  const index = Math.round(level * (sweep.length - 1));
+  return sweep[index];
+}
+
+function updateStepLEDs() {
+  for (let i = 0; i < 8; i++) {
+    const note = STEP_NOTE_BASE + i;
+    if (i === currentPage) {
+      enqueueLED("pad", note, White);
+    } else if (i < pageCount) {
+      enqueueLED("pad", note, DarkGrey);
+    } else {
+      enqueueLED("pad", note, Black);
+    }
+  }
 }
 
 function updateKnobLEDs() {
-    for (let i = 0; i < 8; i++) {
-        if (paramNames[i]) {
-            const colour = valueToKnobColor(paramValues[i], learnMode);
-            enqueueLED('button', KNOB_CCS[i], colour);
-        } else {
-            enqueueLED('button', KNOB_CCS[i], Black);
-        }
+  for (let i = 0; i < 8; i++) {
+    if (paramNames[i]) {
+      const colour = valueToKnobColor(paramValues[i], learnMode);
+      enqueueLED("button", KNOB_CCS[i], colour);
+    } else {
+      enqueueLED("button", KNOB_CCS[i], Black);
     }
+  }
 }
 
 /* ============================================================================
@@ -608,40 +765,57 @@ function updateKnobLEDs() {
  * ============================================================================ */
 
 function init() {
-    clearAllLEDs();
-    os.sleep(300);
+  clearAllLEDs();
+  os.sleep(300);
 
-    initLEDs();
-    drawScreen();
+  initLEDs();
+  drawScreen();
 
-    // Say hello to Ableton
-    console.log('[DC] Module initialized');
-    sendCommand(CMD_HELLO, []);
+  // Say hello to Ableton
+  console.log("[DC] Module initialized");
+  sendCommand(CMD_HELLO, []);
 }
 
 function tick() {
-    tickCount++;
+  tickCount++;
 
-    // Heartbeat watchdog
-    heartbeatTimer++;
-    if (heartbeatTimer > HEARTBEAT_TIMEOUT_TICKS && connected) {
-        connected = false;
-        needsRedraw = true;
+  // Heartbeat watchdog
+  heartbeatTimer++;
+  if (heartbeatTimer > HEARTBEAT_TIMEOUT_TICKS && connected) {
+    connected = false;
+    needsRedraw = true;
+  }
+
+  // Marquee loop with pause for touched knob
+  if (touchedKnob >= 0 && uiLayout === "B" && tickCount % 12 === 0) {
+    const name = paramNames[touchedKnob] || "";
+    const nameW = text_width(name);
+    const colW = 31;
+    const maxScroll = nameW - (colW - 4);
+    if (maxScroll > 0) {
+      marqueeOffset++;
+      // Pause at end (negative values = pausing at start)
+      const pauseTicks = 8;
+      if (marqueeOffset > maxScroll + pauseTicks) {
+        marqueeOffset = -pauseTicks; // pause at start before scrolling again
+      }
+      needsRedraw = true;
     }
+  }
 
-    // Flush LED queue
-    flushLEDQueue();
+  // Flush LED queue
+  flushLEDQueue();
 
-    // Periodic LED update
-    if (tickCount % 120 === 0) {
-        updateKnobLEDs();
-    }
+  // Periodic LED update
+  if (tickCount % 120 === 0) {
+    updateKnobLEDs();
+  }
 
-    // Redraw display
-    if (needsRedraw || tickCount % 24 === 0) {
-        drawScreen();
-        needsRedraw = false;
-    }
+  // Redraw display
+  if (needsRedraw || tickCount % 24 === 0) {
+    drawScreen();
+    needsRedraw = false;
+  }
 }
 
 /* ============================================================================

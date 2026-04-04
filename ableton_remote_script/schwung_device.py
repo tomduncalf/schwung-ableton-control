@@ -18,10 +18,8 @@ MIDI_CHANNEL = 15  # channel 16 (0-indexed)
 KNOB_CCS = [71, 72, 73, 74, 75, 76, 77, 78]
 CC_DEVICE_LEFT = 80
 CC_DEVICE_RIGHT = 81
-CC_BANK_UP = 82
-CC_BANK_DOWN = 83
 CC_LEARN_TOGGLE = 84
-NAV_CCS = {CC_DEVICE_LEFT, CC_DEVICE_RIGHT, CC_BANK_UP, CC_BANK_DOWN, CC_LEARN_TOGGLE}
+NAV_CCS = {CC_DEVICE_LEFT, CC_DEVICE_RIGHT, CC_LEARN_TOGGLE}
 
 # SysEx protocol
 SYSEX_START = 0xF0
@@ -33,10 +31,12 @@ CMD_DEVICE_INFO = 0x01
 CMD_PARAM_INFO = 0x02
 CMD_DEVICE_COUNT = 0x03
 CMD_DEVICE_INDEX = 0x04
-CMD_BANK_INFO = 0x05
+# 0x05 was CMD_BANK_INFO (removed)
 CMD_LEARN_ACK = 0x06
 CMD_HEARTBEAT = 0x07
 CMD_ALL_VALUES = 0x08
+CMD_PAGE_INFO = 0x09
+CMD_PAGE_NAME = 0x0A
 
 # SysEx commands: Move -> Live
 CMD_HELLO = 0x10
@@ -47,6 +47,7 @@ CMD_KNOB_VALUE = 0x14   # Move -> Live: knob_idx, value (0-127)
 CMD_REQUEST_STATE = 0x15
 CMD_UNMAP_KNOB = 0x16
 CMD_NAV_DEVICE = 0x17   # Move -> Live: 0x00=left, 0x01=right
+CMD_PAGE_CHANGE = 0x18  # Move -> Live: pageIndex
 
 # Persistence
 BINDINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bindings.json')
@@ -68,8 +69,7 @@ class SchwungDeviceControl(ControlSurface):
         self._learn_mode = False
         self._device_list = []
         self._device_index = 0
-        self._bank_index = 0
-        self._total_banks = 1
+        self._current_page = 0
         self._active_params = [None] * 8
         self._active_listeners = [None] * 8
         self._bindings = {}
@@ -127,7 +127,7 @@ class SchwungDeviceControl(ControlSurface):
                 self._device_index = self._device_list.index(device)
             except ValueError:
                 self._device_index = 0
-            self._bank_index = 0
+            self._current_page = 0
             self._apply_bindings_for_device(device)
         else:
             self._device_list = []
@@ -231,6 +231,9 @@ class SchwungDeviceControl(ControlSurface):
             if len(data) >= 1:
                 direction = 1 if data[0] == 0x01 else -1
                 self._navigate_device(direction)
+        elif cmd == CMD_PAGE_CHANGE:
+            if len(data) >= 1:
+                self._handle_page_change(data[0])
 
     # =========================================================================
     # Knob value handling (Move -> Live parameter changes)
@@ -267,10 +270,6 @@ class SchwungDeviceControl(ControlSurface):
             self._navigate_device(-1)
         elif cc == CC_DEVICE_RIGHT:
             self._navigate_device(1)
-        elif cc == CC_BANK_UP:
-            self._navigate_bank(1)
-        elif cc == CC_BANK_DOWN:
-            self._navigate_bank(-1)
         elif cc == CC_LEARN_TOGGLE:
             self._learn_mode = not self._learn_mode
             self.log_message('SchwungDeviceControl: learn mode {}'.format(
@@ -294,11 +293,10 @@ class SchwungDeviceControl(ControlSurface):
         # Select the device in Live
         self.song().view.select_device(device)
 
-    def _navigate_bank(self, direction):
-        new_bank = self._bank_index + direction
-        if new_bank < 0 or new_bank >= self._total_banks:
+    def _handle_page_change(self, page_idx):
+        if page_idx < 0 or page_idx >= 8:
             return
-        self._bank_index = new_bank
+        self._current_page = page_idx
         device = self._selected_device
         if device:
             self._apply_bindings_for_device(device)
@@ -339,10 +337,17 @@ class SchwungDeviceControl(ControlSurface):
         param_hash = self._get_param_hash(param.name)
         device_hash = self._get_device_hash(device)
 
-        # Store binding
+        # Store binding on current page
         if device_hash not in self._bindings:
-            self._bindings[device_hash] = {}
-        self._bindings[device_hash][str(knob_idx)] = {
+            self._bindings[device_hash] = {'pages': []}
+        device_entry = self._bindings[device_hash]
+        if 'pages' not in device_entry:
+            device_entry['pages'] = []
+        pages = device_entry['pages']
+        # Auto-create pages up to current_page
+        while len(pages) <= self._current_page:
+            pages.append({'name': '{}'.format(len(pages) + 1), 'knobs': {}})
+        pages[self._current_page]['knobs'][str(knob_idx)] = {
             'param_index': param_index,
             'param_hash': param_hash.hex(),
             'param_name': param.name
@@ -368,8 +373,10 @@ class SchwungDeviceControl(ControlSurface):
         device = self._selected_device
         if device:
             device_hash = self._get_device_hash(device)
-            if device_hash in self._bindings:
-                self._bindings[device_hash].pop(str(knob_idx), None)
+            device_entry = self._bindings.get(device_hash, {})
+            pages = device_entry.get('pages', [])
+            if self._current_page < len(pages):
+                pages[self._current_page]['knobs'].pop(str(knob_idx), None)
                 self._save_bindings()
 
         # Send updated param info (empty)
@@ -431,26 +438,17 @@ class SchwungDeviceControl(ControlSurface):
         self._remove_all_param_listeners()
 
         device_hash = self._get_device_hash(device)
-        bindings = self._bindings.get(device_hash, {})
+        device_entry = self._bindings.get(device_hash, {})
+        pages = device_entry.get('pages', [])
 
-        # Gather all mapped knob indices, sorted
-        mapped_knobs = sorted(bindings.keys(), key=lambda k: int(k))
-
-        if len(mapped_knobs) <= 8:
-            self._total_banks = 1
-            self._bank_index = 0
-            bank_knobs = mapped_knobs
-        else:
-            self._total_banks = (len(mapped_knobs) + 7) // 8
-            self._bank_index = min(self._bank_index, self._total_banks - 1)
-            start = self._bank_index * 8
-            bank_knobs = mapped_knobs[start:start + 8]
-
-        for slot, knob_key in enumerate(bank_knobs):
-            binding = bindings[knob_key]
-            param = self._resolve_param(device, binding)
-            if param is not None:
-                self._bind_param_to_knob(slot, param)
+        if self._current_page < len(pages):
+            page = pages[self._current_page]
+            for knob_key, binding in page.get('knobs', {}).items():
+                knob_idx = int(knob_key)
+                if 0 <= knob_idx < 8:
+                    param = self._resolve_param(device, binding)
+                    if param is not None:
+                        self._bind_param_to_knob(knob_idx, param)
 
     def _resolve_param(self, device, binding):
         """Resolve a binding to a live parameter, using hash then falling back to index."""
@@ -488,9 +486,22 @@ class SchwungDeviceControl(ControlSurface):
         self._send_sysex(CMD_DEVICE_INDEX, [min(127, self._device_index)])
         sleep(SYSEX_DELAY)
 
-        # Bank info
-        self._send_sysex(CMD_BANK_INFO, [self._bank_index, self._total_banks])
+        # Page info
+        device_hash = self._get_device_hash(device)
+        device_entry = self._bindings.get(device_hash, {})
+        pages = device_entry.get('pages', [])
+        page_count = max(1, len(pages))
+        self._send_sysex(CMD_PAGE_INFO, [self._current_page, page_count])
         sleep(SYSEX_DELAY)
+
+        # Page names
+        for i in range(page_count):
+            if i < len(pages):
+                name = pages[i].get('name', '{}'.format(i + 1))
+            else:
+                name = '{}'.format(i + 1)
+            self._send_sysex(CMD_PAGE_NAME, [i] + self._encode_string(name, MAX_PARAM_NAME_LEN) + [0])
+            sleep(SYSEX_DELAY)
 
         # Parameter names
         for i in range(8):
@@ -580,6 +591,18 @@ class SchwungDeviceControl(ControlSurface):
         try:
             with open(BINDINGS_FILE, 'r') as f:
                 self._bindings = json.load(f)
+            # Migrate old format: device_hash -> {knob_idx: binding} to pages format
+            migrated = False
+            for device_hash, entry in self._bindings.items():
+                if 'pages' not in entry:
+                    # Old format — wrap all knobs into page 1
+                    self._bindings[device_hash] = {
+                        'pages': [{'name': 'Page 1', 'knobs': entry}]
+                    }
+                    migrated = True
+            if migrated:
+                self._save_bindings()
+                self.log_message('SchwungDeviceControl: migrated bindings to pages format')
             self.log_message('SchwungDeviceControl: loaded {} device bindings'.format(
                 len(self._bindings)))
         except Exception as e:
