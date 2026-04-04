@@ -88,6 +88,7 @@ Persisted at `ableton_remote_script/bindings.json`. Keyed by device hash (SHA1 o
 - **Knob touch (notes 0-7):** select knob for learn mode, show value overlay
 - **Step buttons (notes 16-23):** switch slot, always sends CMD_PAGE_CHANGE to Ableton
 - **Menu (CC 118):** toggle learn mode on Move side (also sends CMD_LEARN_START/STOP)
+- **Main wheel (CC 14):** sequential page/subpage navigation (wraps around)
 - **Left/Right (CC 119-120):** device navigation
 - **Back (CC 120):** exit module
 

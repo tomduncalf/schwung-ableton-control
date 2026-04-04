@@ -82,6 +82,7 @@ const CMD_REQUEST_STATE = 0x15;
 const CMD_UNMAP_KNOB = 0x16;
 const CMD_PAGE_CHANGE = 0x18; // Move -> Live: pageIndex
 const CMD_REQUEST_VALUE_STRING = 0x19; // Move -> Live: knob_idx
+const CMD_PAGE_SEQUENTIAL = 0x1a; // Move -> Live: direction (0x00=prev, 0x01=next)
 
 // Timing
 const HEARTBEAT_TIMEOUT_TICKS = 720; // ~3 seconds at ~240fps (tick rate is faster than expected)
@@ -453,6 +454,17 @@ function handleInternalCC(cc, value) {
     return;
   }
   // Up/Down arrows currently unused (banks removed, pages use step buttons)
+
+  // Main wheel — sequential page/subpage navigation
+  if (cc === MoveMainKnob) {
+    const delta = decodeDelta(value);
+    if (delta > 0) {
+      sendCommand(CMD_PAGE_SEQUENTIAL, [0x01]);
+    } else if (delta < 0) {
+      sendCommand(CMD_PAGE_SEQUENTIAL, [0x00]);
+    }
+    return;
+  }
 
   // Knob turns
   const knobIdx = KNOB_CCS.indexOf(cc);

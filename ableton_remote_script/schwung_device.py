@@ -52,6 +52,7 @@ CMD_UNMAP_KNOB = 0x16
 CMD_NAV_DEVICE = 0x17   # Move -> Live: 0x00=left, 0x01=right
 CMD_PAGE_CHANGE = 0x18  # Move -> Live: pageIndex
 CMD_REQUEST_VALUE_STRING = 0x19  # Move -> Live: knob_idx
+CMD_PAGE_SEQUENTIAL = 0x1A      # Move -> Live: 0x00=prev, 0x01=next (walks pages in slot order)
 
 # Persistence
 BINDINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bindings.json')
@@ -255,6 +256,10 @@ class SchwungDeviceControl(ControlSurface):
         elif cmd == CMD_PAGE_CHANGE:
             if len(data) >= 1:
                 self._handle_page_change(data[0])
+        elif cmd == CMD_PAGE_SEQUENTIAL:
+            if len(data) >= 1:
+                direction = 1 if data[0] == 0x01 else -1
+                self._handle_page_sequential(direction)
         elif cmd == CMD_REQUEST_VALUE_STRING:
             if len(data) >= 1:
                 self._send_param_value_string(data[0])
@@ -385,6 +390,44 @@ class SchwungDeviceControl(ControlSurface):
                 self._current_page = pages_in_slot[0]
 
         self._current_slot = slot_idx
+        self._apply_bindings_for_device(device)
+        self._send_full_state()
+
+    def _handle_page_sequential(self, direction):
+        """Walk through all pages in slot order: slot 0 sub 0, slot 0 sub 1, slot 1 sub 0, etc."""
+        device = self._selected_device
+        if device is None:
+            return
+        device_hash = self._get_device_hash(device)
+
+        # Build ordered list of (slot, page_index) pairs
+        slot_count = self._get_slot_count(device_hash)
+        ordered = []
+        for slot in range(slot_count):
+            for page_idx in self._get_pages_for_slot(device_hash, slot):
+                ordered.append((slot, page_idx))
+        if not ordered:
+            return
+
+        # Find current position
+        current = (self._current_slot, self._current_page)
+        try:
+            pos = ordered.index(current)
+        except ValueError:
+            pos = 0
+
+        # Move to next/prev with wrapping
+        new_pos = (pos + direction) % len(ordered)
+        new_slot, new_page = ordered[new_pos]
+
+        # Save slot page memory for the slot we're leaving
+        if new_slot != self._current_slot:
+            if device_hash not in self._slot_page_memory:
+                self._slot_page_memory[device_hash] = {}
+            self._slot_page_memory[device_hash][self._current_slot] = self._current_page
+
+        self._current_slot = new_slot
+        self._current_page = new_page
         self._apply_bindings_for_device(device)
         self._send_full_state()
 

@@ -1,5 +1,3 @@
-- How can we leverage wheel?
-  - scroll through pages
 - Note entry
 - Switch device mode
 - Learn whole-set controls
