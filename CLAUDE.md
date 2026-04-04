@@ -40,9 +40,9 @@ Persisted at `ableton_remote_script/bindings.json`. Keyed by device hash (SHA1 o
 {
   "device_hash": {
     "pages": [
-      {"name": "Filter", "slot": 0, "knobs": {"0": {"param_index": 5, "param_name": "Cutoff", "short_name": "Cut"}}},
-      {"name": "LFO", "slot": 1, "knobs": {...}},
-      {"name": "Env", "slot": 1, "knobs": {...}}
+      {"name": "Filter", "slot": 0, "knobs": [{"param_index": 5, "param_name": "Cutoff", "short_name": "Cut"}, null, null, null, null, null, null, null]},
+      {"name": "LFO", "slot": 1, "knobs": [...]},
+      {"name": "Env", "slot": 1, "knobs": [...]}
     ]
   }
 }
@@ -59,9 +59,12 @@ Persisted at `ableton_remote_script/bindings.json`. Keyed by device hash (SHA1 o
 A knob binding can be an array of candidates with `"if"` conditions. First matching condition wins; entry without `"if"` is the default fallback. Conditions compare `str(param)` (Ableton's display string) using `==` or `!=`.
 
 ```json
-"0": [
-  {"param_name": "LFO 2 S. Rate", "short_name": "Rate", "param_index": 25, "if": "LFO 2 Sync == On"},
-  {"param_name": "LFO 2 Rate", "short_name": "Rate", "param_index": 24}
+"knobs": [
+  [
+    {"param_name": "LFO 2 S. Rate", "short_name": "Rate", "param_index": 25, "if": "LFO 2 Sync == On"},
+    {"param_name": "LFO 2 Rate", "short_name": "Rate", "param_index": 24}
+  ],
+  null, null, null, null, null, null, null
 ]
 ```
 

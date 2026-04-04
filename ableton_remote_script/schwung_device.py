@@ -114,6 +114,7 @@ class SchwungDeviceControl(ControlSurface):
         # Set bindings (cross-device, per-set)
         self._set_bindings = {}  # {"pages": [...]}
         self._set_bindings_source_path = None
+        self._set_bindings_mtime = None  # mtime of loaded set bindings file
         self._set_file_path_cache = None  # last known song file_path
 
         self._bindings_mtimes = {}  # {device_hash: mtime}
@@ -469,12 +470,12 @@ class SchwungDeviceControl(ControlSurface):
 
             current_page_has_knobs = (
                 0 <= self._current_page < len(self._bindings.get(device_hash, {}).get('pages', []))
-                and self._bindings[device_hash]['pages'][self._current_page].get('knobs', {})
+                and any(k is not None for k in self._bindings[device_hash]['pages'][self._current_page].get('knobs', []))
             )
             if self._learn_mode and pos == len(pages_in_slot) - 1 and current_page_has_knobs:
                 # Cycled past last sub-page in learn mode: create provisional page
                 pages = self._bindings[device_hash]['pages']
-                new_page = {'name': '{}'.format(len(pages) + 1), 'slot': slot_idx, 'knobs': {}}
+                new_page = {'name': '{}'.format(len(pages) + 1), 'slot': slot_idx, 'knobs': [None] * 8}
                 pages.append(new_page)
                 self._current_page = len(pages) - 1
             else:
@@ -585,8 +586,8 @@ class SchwungDeviceControl(ControlSurface):
         if self._current_page < 0 or self._current_page >= len(pages):
             self._send_sysex(CMD_FAV_ADD_ACK, [fav_index, 2])  # no binding
             return
-        source_knobs = pages[self._current_page].get('knobs', {})
-        source_binding = source_knobs.get(str(knob_idx))
+        source_knobs = pages[self._current_page].get('knobs', [None] * 8)
+        source_binding = source_knobs[knob_idx]
         if source_binding is None:
             self._send_sysex(CMD_FAV_ADD_ACK, [fav_index, 2])  # no binding
             return
@@ -601,17 +602,17 @@ class SchwungDeviceControl(ControlSurface):
             # Create missing fav subpages up to the target index
             while len(self._get_pages_for_slot(device_hash, 8)) <= fav_index:
                 idx = len(self._get_pages_for_slot(device_hash, 8))
-                new_page = {'name': '* {}'.format(idx + 1), 'slot': 8, 'knobs': {}}
+                new_page = {'name': '* {}'.format(idx + 1), 'slot': 8, 'knobs': [None] * 8}
                 pages.append(new_page)
             fav_pages = self._get_pages_for_slot(device_hash, 8)
             fav_page_idx = fav_pages[fav_index]
 
-        fav_knobs = pages[fav_page_idx].get('knobs', {})
+        fav_knobs = pages[fav_page_idx].get('knobs', [None] * 8)
 
         # Find first free knob slot (0-7)
         free_slot = None
         for i in range(8):
-            if str(i) not in fav_knobs:
+            if fav_knobs[i] is None:
                 free_slot = i
                 break
         if free_slot is None:
@@ -619,8 +620,7 @@ class SchwungDeviceControl(ControlSurface):
             return
 
         # Copy binding
-        fav_knobs[str(free_slot)] = copy.deepcopy(source_binding)
-        pages[fav_page_idx]['knobs'] = fav_knobs
+        fav_knobs[free_slot] = copy.deepcopy(source_binding)
         self._save_bindings()
 
         self._send_sysex(CMD_FAV_ADD_ACK, [fav_index, 0])  # success
@@ -671,8 +671,8 @@ class SchwungDeviceControl(ControlSurface):
             if self._current_page < 0 or self._current_page >= len(set_pages):
                 self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
                 return
-            source_knobs = set_pages[self._current_page].get('knobs', {})
-            source_binding = source_knobs.get(str(knob_idx))
+            source_knobs = set_pages[self._current_page].get('knobs', [None] * 8)
+            source_binding = source_knobs[knob_idx]
             if source_binding is None:
                 self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
                 return
@@ -683,8 +683,8 @@ class SchwungDeviceControl(ControlSurface):
             if self._current_page < 0 or self._current_page >= len(pages):
                 self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
                 return
-            source_knobs = pages[self._current_page].get('knobs', {})
-            source_binding = source_knobs.get(str(knob_idx))
+            source_knobs = pages[self._current_page].get('knobs', [None] * 8)
+            source_binding = source_knobs[knob_idx]
             if source_binding is None:
                 self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
                 return
@@ -705,22 +705,21 @@ class SchwungDeviceControl(ControlSurface):
             self._set_bindings['pages'] = []
         set_pages = self._set_bindings['pages']
         while len(set_pages) <= set_index:
-            set_pages.append({'name': 'S {}'.format(len(set_pages) + 1), 'knobs': {}})
+            set_pages.append({'name': 'S {}'.format(len(set_pages) + 1), 'knobs': [None] * 8})
         target_page = set_pages[set_index]
 
         # Find first free knob (0-7)
-        knobs = target_page.get('knobs', {})
+        knobs = target_page.get('knobs', [None] * 8)
         free_slot = None
         for i in range(8):
-            if str(i) not in knobs:
+            if knobs[i] is None:
                 free_slot = i
                 break
         if free_slot is None:
             self._send_sysex(CMD_SET_ADD_ACK, [set_index, 1])  # full
             return
 
-        knobs[str(free_slot)] = new_binding
-        target_page['knobs'] = knobs
+        knobs[free_slot] = new_binding
         self._save_set_bindings()
 
         self._send_sysex(CMD_SET_ADD_ACK, [set_index, 0])  # success
@@ -737,9 +736,8 @@ class SchwungDeviceControl(ControlSurface):
         if self._current_page < 0 or self._current_page >= len(set_pages):
             return
         page = set_pages[self._current_page]
-        for knob_key, binding in page.get('knobs', {}).items():
-            knob_idx = int(knob_key)
-            if 0 <= knob_idx < 8:
+        for knob_idx, binding in enumerate(page.get('knobs', [None] * 8)):
+            if binding is not None and 0 <= knob_idx < 8:
                 device_hash = binding.get('device_hash')
                 if device_hash:
                     device = self._find_device_by_hash(device_hash)
@@ -814,15 +812,19 @@ class SchwungDeviceControl(ControlSurface):
             try:
                 with open(path, 'r') as f:
                     self._set_bindings = json.load(f)
+                self._migrate_knobs(self._set_bindings.get('pages', []))
                 self._set_bindings_source_path = path
+                self._set_bindings_mtime = os.path.getmtime(path)
                 self.log_message('SchwungDeviceControl: loaded set bindings from {}'.format(path))
             except Exception as e:
                 self._set_bindings = {}
                 self._set_bindings_source_path = None
+                self._set_bindings_mtime = None
                 self.log_message('SchwungDeviceControl: set bindings load error: {}'.format(e))
         else:
             self._set_bindings = {}
             self._set_bindings_source_path = None
+            self._set_bindings_mtime = None
         try:
             self._set_file_path_cache = self.song().file_path
         except:
@@ -835,14 +837,11 @@ class SchwungDeviceControl(ControlSurface):
             self.log_message('SchwungDeviceControl: set bindings not saved (unsaved set)')
             return
         try:
-            # Sort for readable JSON
             pages = self._set_bindings.get('pages', [])
-            for page in pages:
-                knobs = page.get('knobs', {})
-                page['knobs'] = dict(sorted(knobs.items(), key=lambda kv: int(kv[0])))
             with open(target, 'w') as f:
                 json.dump(self._set_bindings, f, indent=2)
             self._set_bindings_source_path = target
+            self._set_bindings_mtime = os.path.getmtime(target)
             self.log_message('SchwungDeviceControl: set bindings saved to {}'.format(target))
         except Exception as e:
             self.log_message('SchwungDeviceControl: set bindings save error: {}'.format(e))
@@ -858,6 +857,30 @@ class SchwungDeviceControl(ControlSurface):
             self._load_set_bindings()
             return True
         return False
+
+    def _check_set_bindings_file(self):
+        """Reload set bindings file if modified externally."""
+        path = self._set_bindings_source_path
+        if not path or not os.path.isfile(path):
+            return
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return
+        if mtime == self._set_bindings_mtime:
+            return
+        try:
+            with open(path, 'r') as f:
+                self._set_bindings = json.load(f)
+            self._migrate_knobs(self._set_bindings.get('pages', []))
+            self._set_bindings_mtime = mtime
+            self.log_message('SchwungDeviceControl: reloaded set bindings from {}'.format(path))
+        except Exception as e:
+            self.log_message('SchwungDeviceControl: set bindings reload error: {}'.format(e))
+            return
+        if self._connected and self._current_slot == 9:
+            self._apply_set_page_bindings()
+            self._send_full_state()
 
     # =========================================================================
     # Learn mode
@@ -908,35 +931,34 @@ class SchwungDeviceControl(ControlSurface):
         pages = device_entry['pages']
         # If on empty slot (current_page == -1), create a page for this slot
         if self._current_page < 0:
-            new_page = {'name': '{}'.format(self._current_slot + 1), 'slot': self._current_slot, 'knobs': {}}
+            new_page = {'name': '{}'.format(self._current_slot + 1), 'slot': self._current_slot, 'knobs': [None] * 8}
             pages.append(new_page)
             self._current_page = len(pages) - 1
         # Auto-create pages up to current_page
         while len(pages) <= self._current_page:
-            pages.append({'name': '{}'.format(len(pages) + 1), 'slot': self._current_slot, 'knobs': {}})
+            pages.append({'name': '{}'.format(len(pages) + 1), 'slot': self._current_slot, 'knobs': [None] * 8})
         knobs = pages[self._current_page]['knobs']
-        knob_key = str(knob_idx)
         new_binding = {
             'param_index': param_index,
             'param_name': param.name,
             'short_name': param.name
         }
-        existing = knobs.get(knob_key)
+        existing = knobs[knob_idx]
         if existing is not None:
             # Preserve existing bindings (possibly conditional) as an array
             if isinstance(existing, list):
                 existing.append(new_binding)
-                knobs[knob_key] = existing
+                knobs[knob_idx] = existing
             else:
-                knobs[knob_key] = [existing, new_binding]
+                knobs[knob_idx] = [existing, new_binding]
         else:
-            knobs[knob_key] = new_binding
+            knobs[knob_idx] = new_binding
 
         # Activate immediately
         self._bind_param_to_knob(knob_idx, param)
 
         # Send ACK to Move (use short_name for display)
-        display_name = pages[self._current_page]['knobs'][str(knob_idx)].get('short_name', param.name)
+        display_name = pages[self._current_page]['knobs'][knob_idx].get('short_name', param.name)
         name_bytes = self._encode_string(display_name, MAX_PARAM_NAME_LEN)
         self._send_sysex(CMD_LEARN_ACK, [knob_idx] + name_bytes + [0])
 
@@ -978,9 +1000,9 @@ class SchwungDeviceControl(ControlSurface):
         if self._current_page < 0:
             self._current_page = 0
         while len(set_pages) <= self._current_page:
-            set_pages.append({'name': 'S {}'.format(len(set_pages) + 1), 'knobs': {}})
-        knobs = set_pages[self._current_page].get('knobs', {})
-        knobs[str(knob_idx)] = {
+            set_pages.append({'name': 'S {}'.format(len(set_pages) + 1), 'knobs': [None] * 8})
+        knobs = set_pages[self._current_page].get('knobs', [None] * 8)
+        knobs[knob_idx] = {
             'device_hash': device_hash,
             'device_name': device.name,
             'param_index': param_index,
@@ -1018,7 +1040,7 @@ class SchwungDeviceControl(ControlSurface):
             # Set page: unmap from set bindings
             set_pages = self._set_bindings.get('pages', [])
             if 0 <= self._current_page < len(set_pages):
-                set_pages[self._current_page].get('knobs', {}).pop(str(knob_idx), None)
+                set_pages[self._current_page].get('knobs', [None] * 8)[knob_idx] = None
                 self._save_set_bindings()
         else:
             device = self._selected_device
@@ -1027,7 +1049,7 @@ class SchwungDeviceControl(ControlSurface):
                 device_entry = self._bindings.get(device_hash, {})
                 pages = device_entry.get('pages', [])
                 if self._current_page < len(pages):
-                    pages[self._current_page]['knobs'].pop(str(knob_idx), None)
+                    pages[self._current_page]['knobs'][knob_idx] = None
                     self._save_bindings()
 
         # Send updated param info (empty)
@@ -1044,7 +1066,7 @@ class SchwungDeviceControl(ControlSurface):
         if self._current_page < 0 or self._current_page >= len(pages):
             return
         page = pages[self._current_page]
-        if page.get('knobs', {}):
+        if any(k is not None for k in page.get('knobs', [None] * 8)):
             return  # has bindings, keep it
 
         current_slot = self._get_current_slot(device_hash)
@@ -1170,9 +1192,8 @@ class SchwungDeviceControl(ControlSurface):
             if 0 <= self._current_page < len(pages):
                 page = pages[self._current_page]
                 seen_condition_params = set()
-                for knob_key, binding_or_list in page.get('knobs', {}).items():
-                    knob_idx = int(knob_key)
-                    if 0 <= knob_idx < 8:
+                for knob_idx, binding_or_list in enumerate(page.get('knobs', [None] * 8)):
+                    if binding_or_list is not None and 0 <= knob_idx < 8:
                         binding, cond_params = self._resolve_conditional_binding(device, binding_or_list)
                         for cp in cond_params:
                             if id(cp) not in seen_condition_params:
@@ -1193,7 +1214,7 @@ class SchwungDeviceControl(ControlSurface):
         """Get short_name from set binding for display."""
         set_pages = self._set_bindings.get('pages', [])
         if 0 <= self._current_page < len(set_pages):
-            binding = set_pages[self._current_page].get('knobs', {}).get(str(knob_idx))
+            binding = set_pages[self._current_page].get('knobs', [None] * 8)[knob_idx]
             if binding:
                 return binding.get('short_name', fallback)
         return fallback
@@ -1203,7 +1224,7 @@ class SchwungDeviceControl(ControlSurface):
         device_entry = self._bindings.get(device_hash, {})
         pages = device_entry.get('pages', [])
         if 0 <= self._current_page < len(pages):
-            binding_or_list = pages[self._current_page].get('knobs', {}).get(str(knob_idx))
+            binding_or_list = pages[self._current_page].get('knobs', [None] * 8)[knob_idx]
             if binding_or_list:
                 if isinstance(binding_or_list, list):
                     device = self._selected_device
@@ -1316,7 +1337,7 @@ class SchwungDeviceControl(ControlSurface):
         fav_pages = self._get_pages_for_slot(device_hash, 8)
         if current_slot == 8:
             fav_state = 2
-        elif fav_pages and any(pages[p].get('knobs', {}) for p in fav_pages):
+        elif fav_pages and any(any(k is not None for k in pages[p].get('knobs', [None] * 8)) for p in fav_pages):
             fav_state = 1
         else:
             fav_state = 0
@@ -1328,7 +1349,7 @@ class SchwungDeviceControl(ControlSurface):
         set_pages = self._set_bindings.get('pages', [])
         if current_slot == 9:
             set_state = 2
-        elif set_pages and any(p.get('knobs', {}) for p in set_pages):
+        elif set_pages and any(any(k is not None for k in p.get('knobs', [None] * 8)) for p in set_pages):
             set_state = 1
         else:
             set_state = 0
@@ -1438,6 +1459,7 @@ class SchwungDeviceControl(ControlSurface):
         if self._connected:
             self._send_sysex(CMD_HEARTBEAT, [])
         self._check_bindings_file()
+        self._check_set_bindings_file()
         if self._check_set_file_changed() and self._connected:
             self._send_full_state()
         self._schedule_heartbeat()
@@ -1462,6 +1484,7 @@ class SchwungDeviceControl(ControlSurface):
             try:
                 with open(fpath, 'r') as f:
                     self._bindings[device_hash] = json.load(f)
+                self._migrate_knobs(self._bindings[device_hash].get('pages', []))
                 self._bindings_mtimes[device_hash] = mtime
                 self.log_message('SchwungDeviceControl: reloaded {}'.format(fname))
             except Exception as e:
@@ -1523,12 +1546,9 @@ class SchwungDeviceControl(ControlSurface):
             os.makedirs(_DEVICES_DIR)
         try:
             for device_hash, entry in self._bindings.items():
-                # Sort pages by slot and knobs by index for readable JSON
+                # Sort pages by slot for readable JSON
                 pages = entry.get('pages', [])
                 sorted_pages = sorted(pages, key=lambda p: p.get('slot', 0))
-                for page in sorted_pages:
-                    knobs = page.get('knobs', {})
-                    page['knobs'] = dict(sorted(knobs.items(), key=lambda kv: int(kv[0])))
                 sorted_entry = {}
                 if 'deviceName' in entry:
                     sorted_entry['deviceName'] = entry['deviceName']
@@ -1542,6 +1562,21 @@ class SchwungDeviceControl(ControlSurface):
         except Exception as e:
             self.log_message('SchwungDeviceControl: save error: {}'.format(e))
 
+    @staticmethod
+    def _migrate_knobs(pages):
+        """Convert old dict-keyed knobs format to array format."""
+        for page in pages:
+            knobs = page.get('knobs')
+            if isinstance(knobs, dict):
+                arr = [None] * 8
+                for k, v in knobs.items():
+                    idx = int(k)
+                    if 0 <= idx < 8:
+                        arr[idx] = v
+                page['knobs'] = arr
+            elif not isinstance(knobs, list):
+                page['knobs'] = [None] * 8
+
     def _load_bindings(self):
         self._bindings = {}
         if not os.path.isdir(_DEVICES_DIR):
@@ -1554,6 +1589,7 @@ class SchwungDeviceControl(ControlSurface):
             try:
                 with open(fpath, 'r') as f:
                     self._bindings[device_hash] = json.load(f)
+                self._migrate_knobs(self._bindings[device_hash].get('pages', []))
                 self._bindings_mtimes[device_hash] = os.path.getmtime(fpath)
             except Exception as e:
                 self.log_message('SchwungDeviceControl: load error {}: {}'.format(fname, e))
