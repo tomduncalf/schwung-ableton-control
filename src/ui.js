@@ -68,6 +68,7 @@ const CMD_ALL_VALUES = 0x08;
 const CMD_PAGE_INFO = 0x09;
 const CMD_PAGE_NAME = 0x0a;
 const CMD_PARAM_VALUE_STRING = 0x0b; // Live -> Move: knob_idx, value string
+const CMD_PARAM_STEPS = 0x0c; // Live -> Move: 8 step counts (0=continuous)
 
 // SysEx commands: Move -> Live
 const CMD_HELLO = 0x10;
@@ -107,6 +108,7 @@ let deviceIndex = 0;
 let deviceCount = 0;
 let paramNames = new Array(8).fill("");
 let paramValues = new Array(8).fill(0);
+let paramSteps = new Array(8).fill(0); // 0 = continuous, N = discrete steps
 
 // Page state
 let currentPage = 0;
@@ -346,6 +348,13 @@ function handleSysEx(msg) {
       updateKnobLEDs();
       needsRedraw = true;
       break;
+
+    case CMD_PARAM_STEPS:
+      // Values are offset by +1 to avoid 0x00 in SysEx transport
+      for (let i = 0; i < Math.min(8, payload.length); i++) {
+        paramSteps[i] = Math.max(0, payload[i] - 1);
+      }
+      break;
   }
 }
 
@@ -445,10 +454,24 @@ function handleKnobTurn(idx, rawValue) {
     return;
   }
 
-  const rawDelta = decodeAcceleratedDelta(rawValue, idx);
-  const delta =
-    Math.round(rawDelta * 0.2) || (rawDelta > 0 ? 1 : rawDelta < 0 ? -1 : 0);
-  paramValues[idx] = Math.max(0, Math.min(127, paramValues[idx] + delta));
+  const numSteps = paramSteps[idx];
+
+  if (numSteps >= 2) {
+    // Stepped parameter: ignore acceleration, move ±1 step per detent
+    const rawDelta = decodeDelta(rawValue);
+    const direction = rawDelta > 0 ? 1 : rawDelta < 0 ? -1 : 0;
+    if (direction === 0) return;
+    const stepSize = 127 / (numSteps - 1);
+    const currentStep = Math.round(paramValues[idx] / stepSize);
+    const newStep = Math.max(0, Math.min(numSteps - 1, currentStep + direction));
+    paramValues[idx] = Math.round(newStep * stepSize);
+  } else {
+    // Continuous parameter: accelerated delta as before
+    const rawDelta = decodeAcceleratedDelta(rawValue, idx);
+    const delta =
+      Math.round(rawDelta * 0.2) || (rawDelta > 0 ? 1 : rawDelta < 0 ? -1 : 0);
+    paramValues[idx] = Math.max(0, Math.min(127, paramValues[idx] + delta));
+  }
 
   // Show overlay (will be populated when Ableton sends back the value string)
   overlayKnob = idx;
@@ -592,7 +615,15 @@ function drawParamsClassic() {
       const barW = 18;
       const barH = 5;
       const barY = y + 1;
-      const fillW = Math.round((value / 127) * barW);
+      const ns = paramSteps[i];
+      let fillW;
+      if (ns >= 2) {
+        const stepSize = 127 / (ns - 1);
+        const step = Math.round(value / stepSize);
+        fillW = Math.round((step / (ns - 1)) * barW);
+      } else {
+        fillW = Math.round((value / 127) * barW);
+      }
 
       draw_rect(barX, barY, barW, barH, fg);
       if (touched) {
@@ -646,7 +677,15 @@ function drawParamsCompact() {
     // Single pixel row for value
     const barY = y + 9;
     const barW = colW - 1;
-    const fillW = Math.round((value / 127) * barW);
+    const ns = paramSteps[i];
+    let fillW;
+    if (ns >= 2) {
+      const stepSize = 127 / (ns - 1);
+      const step = Math.round(value / stepSize);
+      fillW = Math.round((step / (ns - 1)) * barW);
+    } else {
+      fillW = Math.round((value / 127) * barW);
+    }
     if (fillW > 0) {
       fill_rect(x, barY, fillW, 2, 1);
     }

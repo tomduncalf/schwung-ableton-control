@@ -38,6 +38,7 @@ CMD_ALL_VALUES = 0x08
 CMD_PAGE_INFO = 0x09
 CMD_PAGE_NAME = 0x0A
 CMD_PARAM_VALUE_STRING = 0x0B  # Live -> Move: knob_idx, value string (e.g. "3.5 kHz")
+CMD_PARAM_STEPS = 0x0C         # Live -> Move: 8 step counts (0=continuous, N=discrete steps)
 
 # SysEx commands: Move -> Live
 CMD_HELLO = 0x10
@@ -255,6 +256,10 @@ class SchwungDeviceControl(ControlSurface):
         normalized = value / 127.0
         new_value = param.min + normalized * (param.max - param.min)
 
+        # Quantize to valid step for discrete parameters
+        if param.is_quantized:
+            new_value = round(new_value)
+
         # Suppress feedback to avoid echo loop
         self._suppressing_feedback[knob_idx] = True
         try:
@@ -370,6 +375,16 @@ class SchwungDeviceControl(ControlSurface):
         name_bytes = self._encode_string(display_name, MAX_PARAM_NAME_LEN)
         self._send_sysex(CMD_LEARN_ACK, [knob_idx] + name_bytes + [0])
 
+        # Send step count (offset by +1 to avoid 0x00 in SysEx)
+        steps = []
+        for i in range(8):
+            p = self._active_params[i]
+            if p is None:
+                steps.append(1)
+            else:
+                steps.append(min(127, self._get_param_num_steps(p)) + 1)
+        self._send_sysex(CMD_PARAM_STEPS, steps)
+
         self._save_bindings()
         self.log_message('SchwungDeviceControl: learned knob {} -> {} ({})'.format(
             knob_idx, param.name, device.name))
@@ -440,6 +455,12 @@ class SchwungDeviceControl(ControlSurface):
             midi_val = int(127 * (param.value - param.min) / val_range)
         midi_val = max(0, min(127, midi_val))
         self._send_sysex(CMD_KNOB_VALUE, [knob_idx, midi_val])
+
+    def _get_param_num_steps(self, param):
+        """Return number of discrete steps (0 = continuous)."""
+        if not param.is_quantized:
+            return 0
+        return len(param.value_items) if param.value_items else int(param.max - param.min) + 1
 
     def _send_param_value_string(self, knob_idx):
         param = self._active_params[knob_idx]
@@ -556,6 +577,19 @@ class SchwungDeviceControl(ControlSurface):
                     v = int(127 * (param.value - param.min) / val_range)
                     values.append(max(0, min(127, v)))
         self._send_sysex(CMD_ALL_VALUES, values)
+        sleep(SYSEX_DELAY)
+
+        # Step counts for discrete/quantized parameters
+        # Offset by +1 to avoid 0x00 bytes in SysEx (0x00 may be stripped in transport)
+        # Move side subtracts 1 on receive
+        steps = []
+        for i in range(8):
+            param = self._active_params[i]
+            if param is None:
+                steps.append(1)  # 1 means 0 (continuous) after -1
+            else:
+                steps.append(min(127, self._get_param_num_steps(param)) + 1)
+        self._send_sysex(CMD_PARAM_STEPS, steps)
 
     # =========================================================================
     # Connection / heartbeat
