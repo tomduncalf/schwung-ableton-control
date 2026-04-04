@@ -39,8 +39,8 @@ src/ui.js                           ableton_remote_script/schwung_device.py
 # Deploy to Move
 ./scripts/install.sh
 
-# Ableton Remote Script: copy ableton_remote_script/ to
-# ~/Music/Ableton/User Library/Remote Scripts/SchwungDeviceControl/
+# Ableton Remote Script (preserves bindings.json)
+./scripts/install_remote_script.sh
 # Then configure in Ableton Preferences > MIDI as control surface
 # using "Ableton Move (Standalone Port)" for input and output.
 ```
@@ -68,6 +68,6 @@ Always run this after editing Move-side code.
 
 After any change to `ableton_remote_script/`, deploy to Ableton with:
 ```bash
-rm -rf /Users/td/Production/Ableton/User\ Library/Remote\ Scripts/SchwungDeviceControl/ && cp -R ./ableton_remote_script /Users/td/Production/Ableton/User\ Library/Remote\ Scripts/SchwungDeviceControl
+./scripts/install_remote_script.sh
 ```
-Then restart Ableton.
+Then restart Ableton. This preserves `bindings.json` if present.

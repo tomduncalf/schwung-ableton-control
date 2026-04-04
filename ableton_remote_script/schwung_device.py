@@ -37,6 +37,7 @@ CMD_HEARTBEAT = 0x07
 CMD_ALL_VALUES = 0x08
 CMD_PAGE_INFO = 0x09
 CMD_PAGE_NAME = 0x0A
+CMD_PARAM_VALUE_STRING = 0x0B  # Live -> Move: knob_idx, value string (e.g. "3.5 kHz")
 
 # SysEx commands: Move -> Live
 CMD_HELLO = 0x10
@@ -48,6 +49,7 @@ CMD_REQUEST_STATE = 0x15
 CMD_UNMAP_KNOB = 0x16
 CMD_NAV_DEVICE = 0x17   # Move -> Live: 0x00=left, 0x01=right
 CMD_PAGE_CHANGE = 0x18  # Move -> Live: pageIndex
+CMD_REQUEST_VALUE_STRING = 0x19  # Move -> Live: knob_idx
 
 # Persistence
 BINDINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bindings.json')
@@ -234,6 +236,9 @@ class SchwungDeviceControl(ControlSurface):
         elif cmd == CMD_PAGE_CHANGE:
             if len(data) >= 1:
                 self._handle_page_change(data[0])
+        elif cmd == CMD_REQUEST_VALUE_STRING:
+            if len(data) >= 1:
+                self._send_param_value_string(data[0])
 
     # =========================================================================
     # Knob value handling (Move -> Live parameter changes)
@@ -257,6 +262,9 @@ class SchwungDeviceControl(ControlSurface):
         except:
             pass
         self._suppressing_feedback[knob_idx] = False
+
+        # Send formatted value string for overlay display
+        self._send_param_value_string(knob_idx)
 
     # =========================================================================
     # Navigation CC handling
@@ -397,6 +405,7 @@ class SchwungDeviceControl(ControlSurface):
         def on_value_changed():
             if not self._suppressing_feedback[knob_idx]:
                 self._send_param_value(knob_idx)
+                self._send_param_value_string(knob_idx)
 
         param.add_value_listener(on_value_changed)
         self._active_listeners[knob_idx] = (param, on_value_changed)
@@ -431,6 +440,14 @@ class SchwungDeviceControl(ControlSurface):
             midi_val = int(127 * (param.value - param.min) / val_range)
         midi_val = max(0, min(127, midi_val))
         self._send_sysex(CMD_KNOB_VALUE, [knob_idx, midi_val])
+
+    def _send_param_value_string(self, knob_idx):
+        param = self._active_params[knob_idx]
+        if param is None:
+            return
+        value_str = str(param)
+        self._send_sysex(CMD_PARAM_VALUE_STRING,
+                         [knob_idx] + self._encode_string(value_str, 20) + [0])
 
     # =========================================================================
     # Apply bindings for current device

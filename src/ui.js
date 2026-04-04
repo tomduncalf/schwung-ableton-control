@@ -67,6 +67,7 @@ const CMD_HEARTBEAT = 0x07;
 const CMD_ALL_VALUES = 0x08;
 const CMD_PAGE_INFO = 0x09;
 const CMD_PAGE_NAME = 0x0a;
+const CMD_PARAM_VALUE_STRING = 0x0b; // Live -> Move: knob_idx, value string
 
 // SysEx commands: Move -> Live
 const CMD_HELLO = 0x10;
@@ -76,6 +77,7 @@ const CMD_NAV_DEVICE = 0x17; // Move -> Live: direction (-1 or +1 as 0x00/0x01)
 const CMD_REQUEST_STATE = 0x15;
 const CMD_UNMAP_KNOB = 0x16;
 const CMD_PAGE_CHANGE = 0x18; // Move -> Live: pageIndex
+const CMD_REQUEST_VALUE_STRING = 0x19; // Move -> Live: knob_idx
 
 // Timing
 const HEARTBEAT_TIMEOUT_TICKS = 720; // ~3 seconds at ~240fps (tick rate is faster than expected)
@@ -113,6 +115,12 @@ let pageNames = ["1", "2", "3", "4", "5", "6", "7", "8"];
 
 // Step button notes (step 1-8 = notes 16-23)
 const STEP_NOTE_BASE = 16;
+
+// Value overlay state
+let overlayKnob = -1; // which knob's overlay is showing (-1 = none)
+let overlayValueStr = ""; // formatted value string from Ableton
+let overlayTimer = 0; // ticks remaining before overlay auto-hides
+const OVERLAY_HOLD_TICKS = 1; // dismiss immediately on release
 
 // LED queue for progressive updates (no cache — raw move_midi_internal_send)
 let ledQueue = [];
@@ -319,6 +327,18 @@ function handleSysEx(msg) {
       }
       break;
 
+    case CMD_PARAM_VALUE_STRING:
+      if (payload.length >= 2) {
+        const vi = payload[0];
+        if (vi >= 0 && vi < 8) {
+          overlayValueStr = decodeString(payload.slice(1));
+          overlayKnob = vi;
+          overlayTimer = OVERLAY_HOLD_TICKS;
+          needsRedraw = true;
+        }
+      }
+      break;
+
     case CMD_ALL_VALUES:
       for (let i = 0; i < Math.min(8, payload.length); i++) {
         paramValues[i] = payload[i];
@@ -430,6 +450,10 @@ function handleKnobTurn(idx, rawValue) {
     Math.round(rawDelta * 0.2) || (rawDelta > 0 ? 1 : rawDelta < 0 ? -1 : 0);
   paramValues[idx] = Math.max(0, Math.min(127, paramValues[idx] + delta));
 
+  // Show overlay (will be populated when Ableton sends back the value string)
+  overlayKnob = idx;
+  overlayTimer = OVERLAY_HOLD_TICKS;
+
   // Send absolute value to Ableton via SysEx (CC doesn't pass through Standalone Port)
   sendCommand(CMD_KNOB_VALUE, [idx, paramValues[idx]]);
 
@@ -451,6 +475,12 @@ function handleInternalNoteOn(note, velocity) {
     // In learn mode, touching a knob is enough to bind it
     if (learnMode && connected) {
       sendCommand(CMD_LEARN_KNOB, [note]);
+    }
+    // Show overlay on touch if param is mapped
+    if (!learnMode && connected && paramNames[note]) {
+      overlayKnob = note;
+      overlayTimer = OVERLAY_HOLD_TICKS;
+      sendCommand(CMD_REQUEST_VALUE_STRING, [note]);
     }
     needsRedraw = true;
     return;
@@ -492,6 +522,10 @@ function drawScreen() {
 
   drawParams();
   drawFooter();
+
+  if (overlayKnob >= 0 && overlayTimer > 0) {
+    drawValueOverlay();
+  }
 }
 
 function drawDisconnected() {
@@ -640,13 +674,15 @@ function drawPageTabs() {
       if (hasControls) {
         const name = pageNames[i] || `${i + 1}`;
         const maxChars = Math.max(1, Math.floor((colW - 3) / 6));
-        const display = name.length > maxChars ? name.substring(0, maxChars) : name;
+        const display =
+          name.length > maxChars ? name.substring(0, maxChars) : name;
         print(x + 1, y + 1, display, 0);
       }
     } else if (hasControls) {
       const name = pageNames[i] || `${i + 1}`;
       const maxChars = Math.max(1, Math.floor((colW - 3) / 6));
-      const display = name.length > maxChars ? name.substring(0, maxChars) : name;
+      const display =
+        name.length > maxChars ? name.substring(0, maxChars) : name;
       print(x + 1, y + 1, display, 1);
     }
   }
@@ -656,10 +692,14 @@ function drawFooter() {
   // Separator line
   draw_rect(0, 53, SCREEN_WIDTH, 1, 1);
 
-  // Device name (left) with index
+  // Device name (left), index (right)
   const name = deviceName || "No Device";
-  const idx = deviceCount > 0 ? ` ${deviceIndex + 1}/${deviceCount}` : "";
-  print(1, 56, name + idx, 1);
+  print(1, 56, name, 1);
+  if (deviceCount > 0) {
+    const idx = `${deviceIndex + 1}/${deviceCount}`;
+    const idxW = text_width(idx);
+    print(SCREEN_WIDTH - idxW - 1, 56, idx, 1);
+  }
 
   // Learn mode indicator (right)
   if (learnMode) {
@@ -674,6 +714,32 @@ function drawFooter() {
       print(SCREEN_WIDTH - w - 2, 56, learnText, 1);
     }
   }
+}
+
+function drawValueOverlay() {
+  const name = paramNames[overlayKnob] || "";
+  const valStr = overlayValueStr || "";
+  if (!name && !valStr) return;
+
+  // Fixed size, centered, over page tabs area
+  const boxW = 120;
+  const boxH = 21;
+  const boxX = Math.floor((SCREEN_WIDTH - boxW) / 2);
+  const boxY = 29;
+
+  // Background with border
+  fill_rect(boxX, boxY, boxW, boxH, 0);
+  draw_rect(boxX, boxY, boxW, boxH, 1);
+
+  // Param name (centered)
+  const nameW = text_width(name);
+  print(boxX + Math.floor((boxW - nameW) / 2), boxY + 3, name, 1);
+
+  // Value string (centered, bold via inverted bar)
+  const valBarY = boxY + 12;
+  const valW = text_width(valStr);
+  fill_rect(boxX + 1, valBarY - 1, boxW - 2, 9, 1);
+  print(boxX + Math.floor((boxW - valW) / 2), valBarY, valStr, 0);
 }
 
 /* ============================================================================
@@ -717,7 +783,11 @@ function scheduleLEDs() {
   // Knob LEDs
   for (let i = 0; i < 8; i++) {
     if (paramNames[i]) {
-      ledQueue.push(["button", KNOB_CCS[i], valueToKnobColor(paramValues[i], learnMode)]);
+      ledQueue.push([
+        "button",
+        KNOB_CCS[i],
+        valueToKnobColor(paramValues[i], learnMode),
+      ]);
     } else {
       ledQueue.push(["button", KNOB_CCS[i], Black]);
     }
@@ -799,6 +869,15 @@ function tick() {
   if (heartbeatTimer > HEARTBEAT_TIMEOUT_TICKS && connected) {
     connected = false;
     needsRedraw = true;
+  }
+
+  // Overlay auto-hide countdown (only when knob not touched)
+  if (overlayTimer > 0 && touchedKnob !== overlayKnob) {
+    overlayTimer--;
+    if (overlayTimer === 0) {
+      overlayKnob = -1;
+      needsRedraw = true;
+    }
   }
 
   // Marquee loop with pause for touched knob
