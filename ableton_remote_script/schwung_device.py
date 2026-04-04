@@ -404,6 +404,13 @@ class SchwungDeviceControl(ControlSurface):
     def _handle_page_change(self, slot_idx):
         if slot_idx < 0 or slot_idx >= 10:
             return
+        # Slot 8/9 = jump to fav slot 8 subpage 0/1 (dedicated buttons, no cycling)
+        fav_target_sub = None
+        if slot_idx == 9:
+            fav_target_sub = 1
+            slot_idx = 8
+        elif slot_idx == 8:
+            fav_target_sub = 0
         device = self._selected_device
         if device is None:
             return
@@ -427,7 +434,10 @@ class SchwungDeviceControl(ControlSurface):
             self._slot_page_memory[device_hash] = {}
         self._slot_page_memory[device_hash][current_slot] = self._current_page
 
-        if slot_idx == current_slot:
+        if fav_target_sub is not None and fav_target_sub < len(pages_in_slot):
+            # Direct jump to a specific subpage (e.g. step 10 -> fav subpage 1)
+            self._current_page = pages_in_slot[fav_target_sub]
+        elif slot_idx == current_slot:
             # Same slot pressed again: cycle to next sub-page
             pos = -1
             try:
@@ -544,7 +554,7 @@ class SchwungDeviceControl(ControlSurface):
     # =========================================================================
 
     def _handle_fav_add(self, fav_index, knob_idx):
-        """Copy binding from current page's knob to a favourite page."""
+        """Copy binding from current page's knob to a favourite page (both on slot 8)."""
         if fav_index < 0 or fav_index > 1 or knob_idx < 0 or knob_idx >= 8:
             return
         device = self._selected_device
@@ -563,17 +573,20 @@ class SchwungDeviceControl(ControlSurface):
             self._send_sysex(CMD_FAV_ADD_ACK, [fav_index, 2])  # no binding
             return
 
-        # Find or create fav page
-        fav_slot = 8 + fav_index
+        # Find or create the target fav subpage (both on slot 8)
         fav_name = '* {}'.format(fav_index + 1)
-        fav_pages = self._get_pages_for_slot(device_hash, fav_slot)
-        if fav_pages:
-            fav_page_idx = fav_pages[0]
+        fav_pages = self._get_pages_for_slot(device_hash, 8)
+        fav_page_idx = None
+        if len(fav_pages) > fav_index:
+            fav_page_idx = fav_pages[fav_index]
         else:
-            # Create fav page
-            new_page = {'name': fav_name, 'slot': fav_slot, 'knobs': {}}
-            pages.append(new_page)
-            fav_page_idx = len(pages) - 1
+            # Create missing fav subpages up to the target index
+            while len(self._get_pages_for_slot(device_hash, 8)) <= fav_index:
+                idx = len(self._get_pages_for_slot(device_hash, 8))
+                new_page = {'name': '* {}'.format(idx + 1), 'slot': 8, 'knobs': {}}
+                pages.append(new_page)
+            fav_pages = self._get_pages_for_slot(device_hash, 8)
+            fav_page_idx = fav_pages[fav_index]
 
         fav_knobs = pages[fav_page_idx].get('knobs', {})
 
@@ -596,8 +609,8 @@ class SchwungDeviceControl(ControlSurface):
         self.log_message('SchwungDeviceControl: fav add slot={} knob={} -> fav {} knob {}'.format(
             self._current_slot, knob_idx, fav_index, free_slot))
 
-        # If currently on the fav page, re-apply bindings to show the new param
-        if self._current_slot == fav_slot:
+        # If currently on the fav slot, re-apply bindings to show the new param
+        if self._current_slot == 8:
             self._apply_bindings_for_device(device)
         self._send_full_state()
 
@@ -972,18 +985,21 @@ class SchwungDeviceControl(ControlSurface):
         current_slot = self._get_current_slot(device_hash)
         slot_count = max(1, self._get_regular_slot_count(device_hash))
 
-        # Fav page states: 0=empty, 1=has bindings, 2=active (offset +1 for SysEx safety)
-        fav_states = []
-        for fi in range(2):
-            fav_slot = 8 + fi
-            fav_pages = self._get_pages_for_slot(device_hash, fav_slot)
-            if current_slot == fav_slot:
-                fav_states.append(2 + 1)
-            elif fav_pages and any(pages[p].get('knobs', {}) for p in fav_pages):
-                fav_states.append(1 + 1)
-            else:
-                fav_states.append(0 + 1)
-        self._send_sysex(CMD_PAGE_INFO, [current_slot, slot_count] + fav_states)
+        # Fav slot info (slot 8, with subpages): state, subpage count, active subpage
+        # State: 0=empty, 1=has bindings, 2=active (offset +1 for SysEx safety)
+        fav_pages = self._get_pages_for_slot(device_hash, 8)
+        if current_slot == 8:
+            fav_state = 2
+        elif fav_pages and any(pages[p].get('knobs', {}) for p in fav_pages):
+            fav_state = 1
+        else:
+            fav_state = 0
+        fav_sub_count = len(fav_pages)
+        fav_active_sub = 0
+        if current_slot == 8 and self._current_page >= 0 and self._current_page in fav_pages:
+            fav_active_sub = fav_pages.index(self._current_page)
+        self._send_sysex(CMD_PAGE_INFO, [current_slot, slot_count,
+                                         fav_state + 1, fav_sub_count + 1, fav_active_sub + 1])
         sleep(SYSEX_DELAY)
 
         # Page names (one per regular slot, showing active sub-page name)

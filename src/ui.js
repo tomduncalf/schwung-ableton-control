@@ -132,8 +132,10 @@ let pageNames = ["1", "2", "3", "4", "5", "6", "7", "8"];
 let slotSubpageCounts = new Array(8).fill(1);
 let slotActiveSubpage = new Array(8).fill(0);
 
-// Favourite page state
-let favStates = [0, 0];        // 0=empty, 1=has bindings, 2=active
+// Favourite page state (single slot 8 with subpages)
+let favState = 0;              // 0=empty, 1=has bindings, 2=active
+let favSubCount = 0;           // number of fav subpages
+let favActiveSub = 0;          // which subpage is active (0-based)
 let favHeld = -1;              // which fav button is held (-1/0/1)
 let favUsedAsModifier = false; // true if knob tapped during fav hold
 let favFeedbackTimer = 0;
@@ -317,9 +319,10 @@ function handleSysEx(msg) {
       if (payload.length >= 2) {
         currentPage = payload[0];
         pageCount = payload[1];
-        if (payload.length >= 4) {
-          favStates[0] = Math.max(0, payload[2] - 1);
-          favStates[1] = Math.max(0, payload[3] - 1);
+        if (payload.length >= 5) {
+          favState = Math.max(0, payload[2] - 1);
+          favSubCount = Math.max(0, payload[3] - 1);
+          favActiveSub = Math.max(0, payload[4] - 1);
         }
         updateStepLEDs();
         needsRedraw = true;
@@ -641,8 +644,14 @@ function handleInternalNoteOn(note, velocity) {
       needsRedraw = true;
       return;
     }
-    // Delete held + touch = reset param to default
+    // Delete held + touch = unmap knob
     if (deleteHeld && !learnMode && connected && paramNames[note]) {
+      sendCommand(CMD_UNMAP_KNOB, [note]);
+      needsRedraw = true;
+      return;
+    }
+    // Shift held + touch = reset param to default
+    if (shiftHeld && !learnMode && connected && paramNames[note]) {
       sendCommand(CMD_RESET_PARAM, [note]);
       overlayKnob = note;
       overlayTimer = OVERLAY_HOLD_TICKS;
@@ -1006,26 +1015,29 @@ function drawPageTabs() {
 }
 
 function drawFooter() {
-  // Fav tabs on left: "* 1" and "* 2" (styled like regular page tabs)
-  const favLabels = ["* 1", "* 2"];
+  // Single fav tab with subpage indicator
   const favTabW = 19;
-  const favTabGap = 1;
-  const favTabY = 55;
+  const favTabY = 54;
   const favTabH = 9;
-  for (let i = 0; i < 2; i++) {
-    const x = i * (favTabW + favTabGap);
-    if (currentPage === 8 + i) {
-      fill_rect(x, favTabY, favTabW, favTabH, 1);
-      print(x + 1, favTabY + 1, favLabels[i], 0);
-    } else if (favStates[i] >= 1) {
-      print(x + 1, favTabY + 1, favLabels[i], 1);
-    } else {
-      print(x + 1, favTabY + 1, favLabels[i], 1);
-    }
+  const favLabel = favSubCount > 0 ? `* ${favActiveSub + 1}` : "*";
+  if (currentPage === 8) {
+    fill_rect(0, favTabY, favTabW, favTabH, 1);
+    print(1, favTabY + 1, favLabel, 0);
+  } else if (favState >= 1) {
+    print(1, favTabY + 1, favLabel, 1);
+  } else {
+    print(1, favTabY + 1, favLabel, 1);
+  }
+  // Subpage indicator under fav tab
+  if (favSubCount > 1) {
+    const indicatorY = favTabY + favTabH;
+    const segW = Math.floor(favTabW / favSubCount);
+    const segX = favActiveSub * segW;
+    fill_rect(segX, indicatorY, segW, 1, 1);
   }
 
   // Device name section: vertical line on left, horizontal line above
-  const nameLeft = 2 * (favTabW + favTabGap) + 4;
+  const nameLeft = favTabW + 6;
   draw_rect(nameLeft, 53, 1, SCREEN_HEIGHT - 53, 1);            // vertical left edge
   draw_rect(nameLeft, 53, SCREEN_WIDTH - nameLeft, 1, 1);       // horizontal top edge
   const name = deviceName || "No Device";
@@ -1116,12 +1128,12 @@ function scheduleLEDs() {
     }
   }
 
-  // Fav step LEDs (step 9-10) — same logic as regular step LEDs
+  // Fav step LEDs (step 9-10) — both reflect fav slot 8 state
   for (let fi = 0; fi < 2; fi++) {
     const note = FAV_STEP_NOTE_BASE + fi;
-    if (currentPage === 8 + fi) {
+    if (currentPage === 8) {
       ledQueue.push(["pad", note, White]);
-    } else if (favStates[fi] >= 1) {
+    } else if (favState >= 1) {
       ledQueue.push(["pad", note, DarkGrey]);
     } else {
       ledQueue.push(["pad", note, Black]);
