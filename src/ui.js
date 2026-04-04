@@ -629,7 +629,7 @@ function drawParamsCompact() {
     if (!name) continue;
 
     // Clip all drawing to this column
-    set_clip_rect(x, y - 1, colW, 10);
+    set_clip_rect(x, y - 1, colW, 12);
 
     if (touched) {
       const nameW = text_width(name);
@@ -644,11 +644,11 @@ function drawParamsCompact() {
     }
 
     // Single pixel row for value
-    const barY = y + 8;
+    const barY = y + 9;
     const barW = colW - 1;
     const fillW = Math.round((value / 127) * barW);
     if (fillW > 0) {
-      fill_rect(x, barY, fillW, 1, 1);
+      fill_rect(x, barY, fillW, 2, 1);
     }
 
     clear_clip_rect();
