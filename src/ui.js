@@ -6,11 +6,6 @@
  */
 
 import {
-  setButtonLED,
-  setLED,
-  clearAllLEDs,
-} from "/data/UserData/move-anything/shared/input_filter.mjs";
-import {
   decodeDelta,
   decodeAcceleratedDelta,
 } from "/data/UserData/move-anything/shared/input_filter.mjs";
@@ -40,7 +35,6 @@ import {
   DarkGrey,
   WhiteLedBright,
 } from "/data/UserData/move-anything/shared/constants.mjs";
-import * as os from "os";
 
 /* ============================================================================
  * Constants
@@ -120,8 +114,9 @@ let pageNames = ["1", "2", "3", "4", "5", "6", "7", "8"];
 // Step button notes (step 1-8 = notes 16-23)
 const STEP_NOTE_BASE = 16;
 
-// LED queue for progressive updates
-const ledQueue = [];
+// LED queue for progressive updates (no cache — raw move_midi_internal_send)
+let ledQueue = [];
+let ledQueueIdx = 0;
 let ledsInitialized = false;
 
 /* ============================================================================
@@ -318,11 +313,7 @@ function handleSysEx(msg) {
         const ki = payload[0];
         if (ki >= 0 && ki < 8) {
           paramValues[ki] = payload[1];
-          enqueueLED(
-            "button",
-            KNOB_CCS[ki],
-            valueToKnobColor(paramValues[ki], learnMode),
-          );
+          buttonLed(KNOB_CCS[ki], valueToKnobColor(paramValues[ki], learnMode));
           needsRedraw = true;
         }
       }
@@ -390,7 +381,10 @@ function handleInternalCC(cc, value) {
       needsRedraw = true;
       return;
     }
-    clearAllLEDs();
+    // Clear step LEDs before exit (queue won't drain after exit)
+    for (let i = 0; i < 8; i++) {
+      padLed(STEP_NOTE_BASE + i, Black);
+    }
     host_exit_module();
     return;
   }
@@ -441,7 +435,7 @@ function handleKnobTurn(idx, rawValue) {
 
   // Update this knob's LED immediately
   const colour = valueToKnobColor(paramValues[idx], learnMode);
-  enqueueLED("button", KNOB_CCS[idx], colour);
+  buttonLed(KNOB_CCS[idx], colour);
 
   needsRedraw = true;
 }
@@ -680,49 +674,79 @@ function drawFooter() {
 
 /* ============================================================================
  * LED Control
+ *
+ * Tool modules must use raw move_midi_internal_send — NOT input_filter.mjs's
+ * cached setLED/setButtonLED. Move's firmware keeps overwriting LEDs, so:
+ *   1. No cache (every send hits hardware)
+ *   2. No LEDs in init() (MIDI HW not ready yet)
+ *   3. Periodic re-send to fight firmware overwrites
  * ============================================================================ */
 
-function enqueueLED(type, id, colour, force = false) {
-  // Replace existing entry for same LED to avoid queue buildup
-  for (let i = 0; i < ledQueue.length; i++) {
-    if (ledQueue[i].type === type && ledQueue[i].id === id) {
-      ledQueue[i].colour = colour;
-      ledQueue[i].force = force || ledQueue[i].force;
-      return;
+function padLed(note, color) {
+  move_midi_internal_send([0x09, 0x90, note, color]);
+}
+
+function buttonLed(cc, color) {
+  move_midi_internal_send([0x0b, 0xb0, cc, color]);
+}
+
+function scheduleLEDs() {
+  ledQueue = [];
+
+  // Step LEDs (page indicators)
+  for (let i = 0; i < 8; i++) {
+    const note = STEP_NOTE_BASE + i;
+    if (i === currentPage) {
+      ledQueue.push(["pad", note, White]);
+    } else if (i < pageCount) {
+      ledQueue.push(["pad", note, DarkGrey]);
+    } else {
+      ledQueue.push(["pad", note, Black]);
     }
   }
-  ledQueue.push({ type, id, colour, force });
+
+  // Clear pad grid (notes 68-99) — Move firmware keeps re-lighting these
+  for (let note = 68; note < 100; note++) {
+    ledQueue.push(["pad", note, Black]);
+  }
+
+  // Knob LEDs
+  for (let i = 0; i < 8; i++) {
+    if (paramNames[i]) {
+      ledQueue.push(["button", KNOB_CCS[i], valueToKnobColor(paramValues[i], learnMode)]);
+    } else {
+      ledQueue.push(["button", KNOB_CCS[i], Black]);
+    }
+  }
+
+  // Nav and function button LEDs
+  const hasNav = deviceCount > 1;
+  ledQueue.push(["button", MoveLeft, hasNav ? WhiteLedBright : Black]);
+  ledQueue.push(["button", MoveRight, hasNav ? WhiteLedBright : Black]);
+  ledQueue.push(["button", MoveMenu, WhiteLedBright]);
+  ledQueue.push(["button", MoveBack, WhiteLedBright]);
+
+  ledQueueIdx = 0;
 }
 
 function flushLEDQueue() {
-  const count = Math.min(LED_MSGS_PER_TICK, ledQueue.length);
-  for (let i = 0; i < count; i++) {
-    const msg = ledQueue.shift();
-    if (msg.type === "pad") {
-      setLED(msg.id, msg.colour, msg.force);
+  if (ledQueueIdx >= ledQueue.length) return;
+  const end = Math.min(ledQueueIdx + LED_MSGS_PER_TICK, ledQueue.length);
+  for (let i = ledQueueIdx; i < end; i++) {
+    const msg = ledQueue[i];
+    if (msg[0] === "pad") {
+      padLed(msg[1], msg[2]);
     } else {
-      setButtonLED(msg.id, msg.colour, msg.force);
+      buttonLed(msg[1], msg[2]);
     }
   }
-}
-
-function initLEDs() {
-  // Knob LEDs off
-  for (let i = 0; i < 8; i++) {
-    enqueueLED("button", KNOB_CCS[i], Black);
-  }
-  // Nav button LEDs
-  enqueueLED("button", MoveMenu, WhiteLedBright);
-  enqueueLED("button", MoveBack, WhiteLedBright);
-  updateNavLEDs();
-  updateStepLEDs();
-  ledsInitialized = true;
+  ledQueueIdx = end;
 }
 
 function updateNavLEDs() {
   const hasNav = deviceCount > 1;
-  enqueueLED("button", MoveLeft, hasNav ? WhiteLedBright : Black, true);
-  enqueueLED("button", MoveRight, hasNav ? WhiteLedBright : Black, true);
+  buttonLed(MoveLeft, hasNav ? WhiteLedBright : Black);
+  buttonLed(MoveRight, hasNav ? WhiteLedBright : Black);
 }
 
 // Color sweep from dim to bright for knob value display
@@ -737,27 +761,11 @@ function valueToKnobColor(value, isLearn) {
 }
 
 function updateStepLEDs() {
-  for (let i = 0; i < 8; i++) {
-    const note = STEP_NOTE_BASE + i;
-    if (i === currentPage) {
-      enqueueLED("pad", note, White);
-    } else if (i < pageCount) {
-      enqueueLED("pad", note, DarkGrey);
-    } else {
-      enqueueLED("pad", note, Black);
-    }
-  }
+  scheduleLEDs();
 }
 
 function updateKnobLEDs() {
-  for (let i = 0; i < 8; i++) {
-    if (paramNames[i]) {
-      const colour = valueToKnobColor(paramValues[i], learnMode);
-      enqueueLED("button", KNOB_CCS[i], colour);
-    } else {
-      enqueueLED("button", KNOB_CCS[i], Black);
-    }
-  }
+  scheduleLEDs();
 }
 
 /* ============================================================================
@@ -765,10 +773,7 @@ function updateKnobLEDs() {
  * ============================================================================ */
 
 function init() {
-  clearAllLEDs();
-  os.sleep(300);
-
-  initLEDs();
+  // Don't set LEDs here — MIDI HW not ready yet, defer to first tick
   drawScreen();
 
   // Say hello to Ableton
@@ -778,6 +783,12 @@ function init() {
 
 function tick() {
   tickCount++;
+
+  // Initialize LEDs on first tick (MIDI HW not ready in init)
+  if (!ledsInitialized) {
+    ledsInitialized = true;
+    scheduleLEDs();
+  }
 
   // Heartbeat watchdog
   heartbeatTimer++;
@@ -803,12 +814,12 @@ function tick() {
     }
   }
 
-  // Flush LED queue
+  // Flush LED queue (8 per tick)
   flushLEDQueue();
 
-  // Periodic LED update
+  // Periodic full LED refresh — fight Move firmware overwriting our LEDs
   if (tickCount % 120 === 0) {
-    updateKnobLEDs();
+    scheduleLEDs();
   }
 
   // Redraw display

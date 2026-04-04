@@ -597,7 +597,7 @@ class SchwungDeviceControl(ControlSurface):
                 if 'pages' not in entry:
                     # Old format — wrap all knobs into page 1
                     self._bindings[device_hash] = {
-                        'pages': [{'name': 'Page 1', 'knobs': entry}]
+                        'pages': [{'name': '1', 'knobs': entry}]
                     }
                     migrated = True
             if migrated:
