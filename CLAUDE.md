@@ -71,6 +71,7 @@ Persisted at `ableton_remote_script/bindings.json`. Keyed by device hash (SHA1 o
 - `_active_listeners[0..7]`: value change listeners for Live→Move sync
 - `_learn_mode`: whether learn mode is active
 - `_slot_page_memory`: last-visited page per slot per device (runtime only, not persisted)
+- `_device_page_memory`: last page/slot per device hash, restored on device re-selection (runtime only)
 - `_bindings`: the full bindings dict, loaded from/saved to bindings.json
 
 ### State (Move side — ui.js)

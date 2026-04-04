@@ -80,6 +80,7 @@ class SchwungDeviceControl(ControlSurface):
         self._bindings = {}
         self._suppressing_feedback = [False] * 8
         self._slot_page_memory = {}  # {device_hash: {slot_idx: page_array_index}}
+        self._device_page_memory = {}  # {device_hash: (page_index, slot_index)}
         self._heartbeat_counter = 0
         self._connected = False
         self._selected_device = None
@@ -126,6 +127,11 @@ class SchwungDeviceControl(ControlSurface):
         self._on_device_changed()
 
     def _on_device_changed(self):
+        # Save current page/slot for the device we're leaving
+        if self._selected_device is not None:
+            prev_hash = self._get_device_hash(self._selected_device)
+            self._device_page_memory[prev_hash] = (self._current_page, self._current_slot)
+
         device = self._get_selected_device()
         self._selected_device = device
         if device is not None:
@@ -134,8 +140,14 @@ class SchwungDeviceControl(ControlSurface):
                 self._device_index = self._device_list.index(device)
             except ValueError:
                 self._device_index = 0
-            self._current_page = 0
-            self._current_slot = 0
+            # Restore remembered page/slot or default to 0
+            device_hash = self._get_device_hash(device)
+            remembered = self._device_page_memory.get(device_hash)
+            if remembered is not None:
+                self._current_page, self._current_slot = remembered
+            else:
+                self._current_page = 0
+                self._current_slot = 0
             self._apply_bindings_for_device(device)
         else:
             self._device_list = []
