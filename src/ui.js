@@ -647,6 +647,15 @@ function drawParamsCompact() {
   const startY = 0;
   const rowHeight = 14;
 
+  // Show hint when no params are mapped on this page
+  const hasAnyParam = paramNames.some((n) => n);
+  if (!hasAnyParam) {
+    const msg = "Press Menu to learn";
+    const w = text_width(msg);
+    print(Math.floor((SCREEN_WIDTH - w) / 2), 10, msg, 1);
+    return;
+  }
+
   for (let i = 0; i < 8; i++) {
     const col = i % 4;
     const row = Math.floor(i / 4);
@@ -712,17 +721,15 @@ function drawPageTabs() {
       fill_rect(x, y, colW, tabH - 1, 1);
       if (hasControls) {
         const name = pageNames[i] || `${i + 1}`;
-        const maxChars = Math.max(1, Math.floor((colW - 3) / 6));
-        const display =
-          name.length > maxChars ? name.substring(0, maxChars) : name;
-        print(x + 1, y + 1, display, 0);
+        set_clip_rect(x, y, colW, tabH - 1);
+        print(x + 1, y + 1, name, 0);
+        clear_clip_rect();
       }
     } else if (hasControls) {
       const name = pageNames[i] || `${i + 1}`;
-      const maxChars = Math.max(1, Math.floor((colW - 3) / 6));
-      const display =
-        name.length > maxChars ? name.substring(0, maxChars) : name;
-      print(x + 1, y + 1, display, 1);
+      set_clip_rect(x, y, colW, tabH - 1);
+      print(x + 1, y + 1, name, 1);
+      clear_clip_rect();
     }
   }
 }
