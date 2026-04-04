@@ -78,6 +78,8 @@ class SchwungDeviceControl(ControlSurface):
         self._current_slot = 0   # always valid slot index (0-7)
         self._active_params = [None] * 8
         self._active_listeners = [None] * 8
+        self._condition_listeners = []  # [(param, callback), ...]
+        self._applying_bindings = False
         self._bindings = {}
         self._suppressing_feedback = [False] * 8
         self._slot_page_memory = {}  # {device_hash: {slot_idx: page_array_index}}
@@ -158,7 +160,7 @@ class SchwungDeviceControl(ControlSurface):
             self._send_full_state()
 
     # =========================================================================
-    # Device traversal (adapted from roto_control)
+    # Device traversal
     # =========================================================================
 
     def _get_device_list(self):
@@ -509,11 +511,23 @@ class SchwungDeviceControl(ControlSurface):
         # Auto-create pages up to current_page
         while len(pages) <= self._current_page:
             pages.append({'name': '{}'.format(len(pages) + 1), 'slot': self._current_slot, 'knobs': {}})
-        pages[self._current_page]['knobs'][str(knob_idx)] = {
+        knobs = pages[self._current_page]['knobs']
+        knob_key = str(knob_idx)
+        new_binding = {
             'param_index': param_index,
             'param_name': param.name,
             'short_name': param.name
         }
+        existing = knobs.get(knob_key)
+        if existing is not None:
+            # Preserve existing bindings (possibly conditional) as an array
+            if isinstance(existing, list):
+                existing.append(new_binding)
+                knobs[knob_key] = existing
+            else:
+                knobs[knob_key] = [existing, new_binding]
+        else:
+            knobs[knob_key] = new_binding
 
         # Activate immediately
         self._bind_param_to_knob(knob_idx, param)
@@ -634,6 +648,12 @@ class SchwungDeviceControl(ControlSurface):
     def _remove_all_param_listeners(self):
         for i in range(8):
             self._unbind_knob(i)
+        for param, callback in self._condition_listeners:
+            try:
+                param.remove_value_listener(callback)
+            except:
+                pass
+        self._condition_listeners = []
 
     def _send_param_value(self, knob_idx):
         param = self._active_params[knob_idx]
@@ -667,30 +687,102 @@ class SchwungDeviceControl(ControlSurface):
     # =========================================================================
 
     def _apply_bindings_for_device(self, device):
-        self._remove_all_param_listeners()
+        if self._applying_bindings:
+            return
+        self._applying_bindings = True
+        try:
+            self._remove_all_param_listeners()
 
-        device_hash = self._get_device_hash(device)
-        device_entry = self._bindings.get(device_hash, {})
-        pages = device_entry.get('pages', [])
+            device_hash = self._get_device_hash(device)
+            device_entry = self._bindings.get(device_hash, {})
+            pages = device_entry.get('pages', [])
 
-        if 0 <= self._current_page < len(pages):
-            page = pages[self._current_page]
-            for knob_key, binding in page.get('knobs', {}).items():
-                knob_idx = int(knob_key)
-                if 0 <= knob_idx < 8:
-                    param = self._resolve_param(device, binding)
-                    if param is not None:
-                        self._bind_param_to_knob(knob_idx, param)
+            if 0 <= self._current_page < len(pages):
+                page = pages[self._current_page]
+                seen_condition_params = set()
+                for knob_key, binding_or_list in page.get('knobs', {}).items():
+                    knob_idx = int(knob_key)
+                    if 0 <= knob_idx < 8:
+                        binding, cond_params = self._resolve_conditional_binding(device, binding_or_list)
+                        for cp in cond_params:
+                            if id(cp) not in seen_condition_params:
+                                seen_condition_params.add(id(cp))
+                                def on_condition_changed(d=device):
+                                    self._apply_bindings_for_device(d)
+                                    self._send_full_state()
+                                cp.add_value_listener(on_condition_changed)
+                                self._condition_listeners.append((cp, on_condition_changed))
+                        if binding is not None:
+                            param = self._resolve_param(device, binding)
+                            if param is not None:
+                                self._bind_param_to_knob(knob_idx, param)
+        finally:
+            self._applying_bindings = False
 
     def _get_display_name(self, device_hash, knob_idx, fallback):
         """Get short_name from binding for display, falling back to the full param name."""
         device_entry = self._bindings.get(device_hash, {})
         pages = device_entry.get('pages', [])
         if 0 <= self._current_page < len(pages):
-            binding = pages[self._current_page].get('knobs', {}).get(str(knob_idx))
-            if binding:
-                return binding.get('short_name', fallback)
+            binding_or_list = pages[self._current_page].get('knobs', {}).get(str(knob_idx))
+            if binding_or_list:
+                if isinstance(binding_or_list, list):
+                    device = self._selected_device
+                    if device:
+                        binding, _ = self._resolve_conditional_binding(device, binding_or_list)
+                        if binding:
+                            return binding.get('short_name', fallback)
+                else:
+                    return binding_or_list.get('short_name', fallback)
         return fallback
+
+    def _resolve_conditional_binding(self, device, binding_or_list):
+        """If binding is a list, evaluate conditions and return the active binding dict.
+        If it's a plain dict, return it as-is. Returns (binding_dict, [condition_params])."""
+        if isinstance(binding_or_list, dict):
+            cond = binding_or_list.get('if')
+            if cond is not None:
+                result, cond_param = self._evaluate_condition(device, cond)
+                cond_params = [cond_param] if cond_param else []
+                return (binding_or_list if result else None), cond_params
+            return binding_or_list, []
+        if not isinstance(binding_or_list, list) or not binding_or_list:
+            return None, []
+
+        condition_params = []
+        fallback = None
+        for candidate in binding_or_list:
+            cond = candidate.get('if')
+            if cond is None:
+                fallback = candidate
+                continue
+            result, cond_param = self._evaluate_condition(device, cond)
+            if cond_param is not None:
+                condition_params.append(cond_param)
+            if result:
+                return candidate, condition_params
+        return fallback, condition_params
+
+    def _evaluate_condition(self, device, condition_str):
+        """Parse and evaluate a condition like 'ParamName == Value' or 'ParamName != Value'.
+        Returns (bool, param_or_None)."""
+        for op in ('!=', '=='):
+            if op in condition_str:
+                parts = condition_str.split(op, 1)
+                param_name = parts[0].strip()
+                expected = parts[1].strip()
+                matches = [p for p in device.parameters if p.name == param_name]
+                if matches:
+                    param = matches[0]
+                    actual = str(param)
+                    result = (actual == expected) if op == '==' else (actual != expected)
+                    self.log_message('[DC] condition: "{}" {} "{}" -> {} (param name: "{}")'.format(
+                        actual, op, expected, result, param.name))
+                    return result, param
+                self.log_message('[DC] condition param not found: "{}" (available: {})'.format(
+                    param_name, ', '.join(p.name for p in device.parameters)))
+                return False, None
+        return False, None
 
     def _resolve_param(self, device, binding):
         """Resolve a binding to a live parameter, using name then falling back to index."""
@@ -857,7 +949,7 @@ class SchwungDeviceControl(ControlSurface):
                 self._send_full_state()
 
     # =========================================================================
-    # Hashing (adapted from roto_control)
+    # Hashing
     # =========================================================================
 
 

@@ -52,6 +52,20 @@ Persisted at `ableton_remote_script/bindings.json`. Keyed by device hash (SHA1 o
 - Multiple pages can share a slot — pressing the step button cycles through them
 - `param_name` is used for resolution (name match first, then `param_index` fallback)
 - `short_name` is what's displayed on Move (editable in JSON, defaults to param_name)
+- `deviceName` is stored alongside `pages` for human-readable device identification
+
+### Conditional Bindings
+
+A knob binding can be an array of candidates with `"if"` conditions. First matching condition wins; entry without `"if"` is the default fallback. Conditions compare `str(param)` (Ableton's display string) using `==` or `!=`.
+
+```json
+"0": [
+  {"param_name": "LFO 2 S. Rate", "short_name": "Rate", "param_index": 25, "if": "LFO 2 Sync == On"},
+  {"param_name": "LFO 2 Rate", "short_name": "Rate", "param_index": 24}
+]
+```
+
+When the condition parameter changes, bindings re-apply automatically.
 
 ### Slots vs Pages
 

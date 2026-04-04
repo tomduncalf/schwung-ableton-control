@@ -3,5 +3,5 @@
 - Learn whole-set controls
   - File alongside set?
   - For set duplicates, fallback to most recent in dir?
-- Update binding on the fly
 - Some way to reset control to zero
+- Split bindings to files
