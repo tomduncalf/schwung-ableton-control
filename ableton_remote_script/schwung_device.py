@@ -53,6 +53,7 @@ CMD_NAV_DEVICE = 0x17   # Move -> Live: 0x00=left, 0x01=right
 CMD_PAGE_CHANGE = 0x18  # Move -> Live: pageIndex
 CMD_REQUEST_VALUE_STRING = 0x19  # Move -> Live: knob_idx
 CMD_PAGE_SEQUENTIAL = 0x1A      # Move -> Live: 0x00=prev, 0x01=next (walks pages in slot order)
+CMD_RESET_PARAM = 0x1B          # Move -> Live: knob_idx (reset to default value)
 
 # Persistence
 BINDINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bindings.json')
@@ -265,6 +266,9 @@ class SchwungDeviceControl(ControlSurface):
         elif cmd == CMD_REQUEST_VALUE_STRING:
             if len(data) >= 1:
                 self._send_param_value_string(data[0])
+        elif cmd == CMD_RESET_PARAM:
+            if len(data) >= 1:
+                self._reset_param_to_default(data[0])
 
     # =========================================================================
     # Knob value handling (Move -> Live parameter changes)
@@ -295,6 +299,22 @@ class SchwungDeviceControl(ControlSurface):
 
         # Send formatted value string for overlay display
         self._send_param_value_string(knob_idx)
+
+    def _reset_param_to_default(self, knob_idx):
+        if knob_idx < 0 or knob_idx >= 8:
+            return
+        param = self._active_params[knob_idx]
+        if param is None:
+            return
+        self._suppressing_feedback[knob_idx] = True
+        try:
+            param.value = param.default_value
+        except:
+            pass
+        self._suppressing_feedback[knob_idx] = False
+        self._send_param_value(knob_idx)
+        self._send_param_value_string(knob_idx)
+        self.log_message('SchwungDeviceControl: reset knob {} to default'.format(knob_idx))
 
     # =========================================================================
     # Navigation CC handling

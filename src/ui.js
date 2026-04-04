@@ -27,6 +27,7 @@ import {
   MoveKnob8,
   MoveMainKnob,
   MoveMainButton,
+  MoveDelete,
   White,
   Black,
   BrightGreen,
@@ -83,6 +84,7 @@ const CMD_UNMAP_KNOB = 0x16;
 const CMD_PAGE_CHANGE = 0x18; // Move -> Live: pageIndex
 const CMD_REQUEST_VALUE_STRING = 0x19; // Move -> Live: knob_idx
 const CMD_PAGE_SEQUENTIAL = 0x1a; // Move -> Live: direction (0x00=prev, 0x01=next)
+const CMD_RESET_PARAM = 0x1b;    // Move -> Live: knob_idx (reset to default value)
 
 // Timing
 const HEARTBEAT_TIMEOUT_TICKS = 720; // ~3 seconds at ~240fps (tick rate is faster than expected)
@@ -96,6 +98,7 @@ let connected = false;
 let heartbeatTimer = 0;
 let learnMode = false;
 let shiftHeld = false;
+let deleteHeld = false;
 let needsRedraw = true;
 let tickCount = 0;
 let touchedKnob = -1; // -1 = none, 0-7 = knob index (derived from touchStack)
@@ -420,6 +423,12 @@ function handleInternalCC(cc, value) {
     return;
   }
 
+  // Delete (X) button state
+  if (cc === MoveDelete) {
+    deleteHeld = value > 63;
+    return;
+  }
+
   // Back button
   if (cc === MoveBack && value > 63) {
     if (learnMode) {
@@ -531,6 +540,14 @@ function handleInternalNoteOn(note, velocity) {
     if (marqueeKnob !== note) {
       marqueeKnob = note;
       marqueeOffset = 0;
+    }
+    // Delete held + touch = reset param to default
+    if (deleteHeld && !learnMode && connected && paramNames[note]) {
+      sendCommand(CMD_RESET_PARAM, [note]);
+      overlayKnob = note;
+      overlayTimer = OVERLAY_HOLD_TICKS;
+      needsRedraw = true;
+      return;
     }
     // In learn mode, touching a knob is enough to bind it
     if (learnMode && connected) {
