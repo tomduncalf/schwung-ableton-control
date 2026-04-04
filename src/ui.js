@@ -94,7 +94,8 @@ let learnMode = false;
 let shiftHeld = false;
 let needsRedraw = true;
 let tickCount = 0;
-let touchedKnob = -1; // -1 = none, 0-7 = knob index
+let touchedKnob = -1; // -1 = none, 0-7 = knob index (derived from touchStack)
+let touchStack = []; // stack of currently touched knob indices, most recent last
 let marqueeOffset = 0; // pixel scroll offset for touched knob name
 let marqueeKnob = -1; // which knob marquee is active for
 // marqueeDirection no longer used (loop mode, not bounce)
@@ -495,6 +496,10 @@ function handleKnobTurn(idx, rawValue) {
 function handleInternalNoteOn(note, velocity) {
   // Capacitive knob touch (notes 0-7)
   if (note < 8) {
+    // Remove if already in stack (re-touch), then push to top
+    const si = touchStack.indexOf(note);
+    if (si >= 0) touchStack.splice(si, 1);
+    touchStack.push(note);
     touchedKnob = note;
     if (marqueeKnob !== note) {
       marqueeKnob = note;
@@ -528,11 +533,31 @@ function handleInternalNoteOn(note, velocity) {
 }
 
 function handleInternalNoteOff(note) {
-  if (note < 8 && touchedKnob === note) {
-    touchedKnob = -1;
-    marqueeKnob = -1;
-    marqueeOffset = 0;
-    needsRedraw = true;
+  if (note < 8) {
+    const si = touchStack.indexOf(note);
+    if (si >= 0) {
+      touchStack.splice(si, 1);
+      const prev = touchStack.length > 0 ? touchStack[touchStack.length - 1] : -1;
+      touchedKnob = prev;
+      if (prev >= 0) {
+        if (marqueeKnob !== prev) {
+          marqueeKnob = prev;
+          marqueeOffset = 0;
+        }
+        // Restore overlay to the knob we're falling back to
+        if (connected && paramNames[prev]) {
+          overlayKnob = prev;
+          overlayTimer = OVERLAY_HOLD_TICKS;
+          sendCommand(CMD_REQUEST_VALUE_STRING, [prev]);
+        }
+      } else {
+        marqueeKnob = -1;
+        marqueeOffset = 0;
+        overlayKnob = -1;
+        overlayTimer = 0;
+      }
+      needsRedraw = true;
+    }
   }
 }
 
