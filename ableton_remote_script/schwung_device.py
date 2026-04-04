@@ -6,6 +6,7 @@ Communicates over MIDI cable 2 (USB-C) using CC on channel 16 for real-time valu
 and SysEx with header F0 00 7D 01 for structured data.
 """
 
+import copy
 import hashlib
 import json
 import os
@@ -60,6 +61,10 @@ CMD_DEVICE_SELECT = 0x1D        # Move -> Live: device_index (select by flat ind
 
 # SysEx commands: Live -> Move (device browser)
 CMD_DEVICE_LIST_RESPONSE = 0x0E  # Live -> Move: offset, total, name1\0, name2\0, ...
+CMD_FAV_ADD_ACK = 0x0F           # Live -> Move: fav_index, result (0=ok, 1=full, 2=no binding)
+
+# SysEx commands: Move -> Live (favourites)
+CMD_FAV_ADD = 0x1E               # Move -> Live: fav_index (0/1), knob_idx
 
 # Persistence
 if sys.platform == 'darwin':
@@ -88,7 +93,7 @@ class SchwungDeviceControl(ControlSurface):
         self._device_list = []
         self._device_index = 0
         self._current_page = 0   # index into pages array, or -1 if on empty slot
-        self._current_slot = 0   # always valid slot index (0-7)
+        self._current_slot = 0   # always valid slot index (0-9, 8-9 = favourites)
         self._active_params = [None] * 8
         self._active_listeners = [None] * 8
         self._condition_listeners = []  # [(param, callback), ...]
@@ -287,6 +292,9 @@ class SchwungDeviceControl(ControlSurface):
         elif cmd == CMD_DEVICE_SELECT:
             if len(data) >= 1:
                 self._select_device_by_index(data[0])
+        elif cmd == CMD_FAV_ADD:
+            if len(data) >= 2:
+                self._handle_fav_add(data[0], data[1])
 
     # =========================================================================
     # Knob value handling (Move -> Live parameter changes)
@@ -394,7 +402,7 @@ class SchwungDeviceControl(ControlSurface):
         self.song().view.select_device(device)
 
     def _handle_page_change(self, slot_idx):
-        if slot_idx < 0 or slot_idx >= 8:
+        if slot_idx < 0 or slot_idx >= 10:
             return
         device = self._selected_device
         if device is None:
@@ -462,8 +470,8 @@ class SchwungDeviceControl(ControlSurface):
             return
         device_hash = self._get_device_hash(device)
 
-        # Build ordered list of (slot, page_index) pairs
-        slot_count = self._get_slot_count(device_hash)
+        # Build ordered list of (slot, page_index) pairs — regular slots only (0-7)
+        slot_count = self._get_regular_slot_count(device_hash)
         ordered = []
         for slot in range(slot_count):
             for page_idx in self._get_pages_for_slot(device_hash, slot):
@@ -517,9 +525,81 @@ class SchwungDeviceControl(ControlSurface):
         max_slot = max(p.get('slot', i) for i, p in enumerate(pages))
         return max_slot + 1
 
+    def _get_regular_slot_count(self, device_hash):
+        """Return number of regular slots (max slot < 8, plus 1)."""
+        pages = self._bindings.get(device_hash, {}).get('pages', [])
+        if not pages:
+            return 1
+        regular_slots = [p.get('slot', i) for i, p in enumerate(pages) if p.get('slot', i) < 8]
+        if not regular_slots:
+            return 1
+        return max(regular_slots) + 1
+
     def _get_current_slot(self, device_hash=None):
         """Return the current slot index."""
         return self._current_slot
+
+    # =========================================================================
+    # Favourites
+    # =========================================================================
+
+    def _handle_fav_add(self, fav_index, knob_idx):
+        """Copy binding from current page's knob to a favourite page."""
+        if fav_index < 0 or fav_index > 1 or knob_idx < 0 or knob_idx >= 8:
+            return
+        device = self._selected_device
+        if device is None:
+            return
+        device_hash = self._get_device_hash(device)
+        pages = self._bindings.get(device_hash, {}).get('pages', [])
+
+        # Get source binding from current page
+        if self._current_page < 0 or self._current_page >= len(pages):
+            self._send_sysex(CMD_FAV_ADD_ACK, [fav_index, 2])  # no binding
+            return
+        source_knobs = pages[self._current_page].get('knobs', {})
+        source_binding = source_knobs.get(str(knob_idx))
+        if source_binding is None:
+            self._send_sysex(CMD_FAV_ADD_ACK, [fav_index, 2])  # no binding
+            return
+
+        # Find or create fav page
+        fav_slot = 8 + fav_index
+        fav_name = '* {}'.format(fav_index + 1)
+        fav_pages = self._get_pages_for_slot(device_hash, fav_slot)
+        if fav_pages:
+            fav_page_idx = fav_pages[0]
+        else:
+            # Create fav page
+            new_page = {'name': fav_name, 'slot': fav_slot, 'knobs': {}}
+            pages.append(new_page)
+            fav_page_idx = len(pages) - 1
+
+        fav_knobs = pages[fav_page_idx].get('knobs', {})
+
+        # Find first free knob slot (0-7)
+        free_slot = None
+        for i in range(8):
+            if str(i) not in fav_knobs:
+                free_slot = i
+                break
+        if free_slot is None:
+            self._send_sysex(CMD_FAV_ADD_ACK, [fav_index, 1])  # full
+            return
+
+        # Copy binding
+        fav_knobs[str(free_slot)] = copy.deepcopy(source_binding)
+        pages[fav_page_idx]['knobs'] = fav_knobs
+        self._save_bindings()
+
+        self._send_sysex(CMD_FAV_ADD_ACK, [fav_index, 0])  # success
+        self.log_message('SchwungDeviceControl: fav add slot={} knob={} -> fav {} knob {}'.format(
+            self._current_slot, knob_idx, fav_index, free_slot))
+
+        # If currently on the fav page, re-apply bindings to show the new param
+        if self._current_slot == fav_slot:
+            self._apply_bindings_for_device(device)
+        self._send_full_state()
 
     # =========================================================================
     # Learn mode
@@ -890,11 +970,23 @@ class SchwungDeviceControl(ControlSurface):
         device_entry = self._bindings.get(device_hash, {})
         pages = device_entry.get('pages', [])
         current_slot = self._get_current_slot(device_hash)
-        slot_count = max(1, self._get_slot_count(device_hash))
-        self._send_sysex(CMD_PAGE_INFO, [current_slot, slot_count])
+        slot_count = max(1, self._get_regular_slot_count(device_hash))
+
+        # Fav page states: 0=empty, 1=has bindings, 2=active (offset +1 for SysEx safety)
+        fav_states = []
+        for fi in range(2):
+            fav_slot = 8 + fi
+            fav_pages = self._get_pages_for_slot(device_hash, fav_slot)
+            if current_slot == fav_slot:
+                fav_states.append(2 + 1)
+            elif fav_pages and any(pages[p].get('knobs', {}) for p in fav_pages):
+                fav_states.append(1 + 1)
+            else:
+                fav_states.append(0 + 1)
+        self._send_sysex(CMD_PAGE_INFO, [current_slot, slot_count] + fav_states)
         sleep(SYSEX_DELAY)
 
-        # Page names (one per slot, showing active sub-page name)
+        # Page names (one per regular slot, showing active sub-page name)
         for slot in range(slot_count):
             slot_pages = self._get_pages_for_slot(device_hash, slot)
             if slot_pages:

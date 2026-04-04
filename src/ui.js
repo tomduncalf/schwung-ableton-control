@@ -89,6 +89,8 @@ const CMD_PAGE_SEQUENTIAL = 0x1a; // Move -> Live: direction (0x00=prev, 0x01=ne
 const CMD_RESET_PARAM = 0x1b;    // Move -> Live: knob_idx (reset to default value)
 const CMD_DEVICE_LIST_REQUEST = 0x1c; // Move -> Live: offset (request 8 device names)
 const CMD_DEVICE_SELECT = 0x1d;       // Move -> Live: device_index (select by flat index)
+const CMD_FAV_ADD = 0x1e;             // Move -> Live: fav_index (0/1), knob_idx
+const CMD_FAV_ADD_ACK = 0x0f;         // Live -> Move: fav_index, result (0=ok, 1=full, 2=no binding)
 
 // Timing
 const HEARTBEAT_TIMEOUT_TICKS = 720; // ~3 seconds at ~240fps (tick rate is faster than expected)
@@ -130,8 +132,16 @@ let pageNames = ["1", "2", "3", "4", "5", "6", "7", "8"];
 let slotSubpageCounts = new Array(8).fill(1);
 let slotActiveSubpage = new Array(8).fill(0);
 
+// Favourite page state
+let favStates = [0, 0];        // 0=empty, 1=has bindings, 2=active
+let favHeld = -1;              // which fav button is held (-1/0/1)
+let favUsedAsModifier = false; // true if knob tapped during fav hold
+let favFeedbackTimer = 0;
+let favFeedbackText = "";
+
 // Step button notes (step 1-8 = notes 16-23)
 const STEP_NOTE_BASE = 16;
+const FAV_STEP_NOTE_BASE = 24; // step 9-10 = notes 24-25
 
 // Value overlay state
 let overlayKnob = -1; // which knob's overlay is showing (-1 = none)
@@ -307,7 +317,22 @@ function handleSysEx(msg) {
       if (payload.length >= 2) {
         currentPage = payload[0];
         pageCount = payload[1];
+        if (payload.length >= 4) {
+          favStates[0] = Math.max(0, payload[2] - 1);
+          favStates[1] = Math.max(0, payload[3] - 1);
+        }
         updateStepLEDs();
+        needsRedraw = true;
+      }
+      break;
+
+    case CMD_FAV_ADD_ACK:
+      if (payload.length >= 2) {
+        const result = payload[1];
+        if (result === 0) favFeedbackText = "Added";
+        else if (result === 1) favFeedbackText = "Full";
+        else favFeedbackText = "Empty";
+        favFeedbackTimer = 180;
         needsRedraw = true;
       }
       break;
@@ -505,6 +530,8 @@ function handleInternalCC(cc, value) {
     for (let i = 0; i < 8; i++) {
       padLed(STEP_NOTE_BASE + i, Black);
     }
+    padLed(FAV_STEP_NOTE_BASE, Black);
+    padLed(FAV_STEP_NOTE_BASE + 1, Black);
     host_exit_module();
     return;
   }
@@ -605,6 +632,15 @@ function handleInternalNoteOn(note, velocity) {
       marqueeKnob = note;
       marqueeOffset = 0;
     }
+    // Fav held + touch = add binding to favourite page
+    if (favHeld >= 0 && connected && paramNames[note]) {
+      sendCommand(CMD_FAV_ADD, [favHeld, note]);
+      favUsedAsModifier = true;
+      overlayKnob = note;
+      overlayTimer = OVERLAY_HOLD_TICKS;
+      needsRedraw = true;
+      return;
+    }
     // Delete held + touch = reset param to default
     if (deleteHeld && !learnMode && connected && paramNames[note]) {
       sendCommand(CMD_RESET_PARAM, [note]);
@@ -642,6 +678,13 @@ function handleInternalNoteOn(note, velocity) {
     sendCommand(CMD_PAGE_CHANGE, [slotIdx]);
     return;
   }
+
+  // Fav step buttons 9-10 (notes 24-25)
+  if (note >= FAV_STEP_NOTE_BASE && note < FAV_STEP_NOTE_BASE + 2) {
+    favHeld = note - FAV_STEP_NOTE_BASE;
+    favUsedAsModifier = false;
+    return;
+  }
 }
 
 function handleInternalNoteOff(note) {
@@ -671,6 +714,17 @@ function handleInternalNoteOff(note) {
       needsRedraw = true;
     }
   }
+
+  // Fav step button release (notes 24-25)
+  if (note >= FAV_STEP_NOTE_BASE && note < FAV_STEP_NOTE_BASE + 2) {
+    const fi = note - FAV_STEP_NOTE_BASE;
+    if (fi === favHeld && !favUsedAsModifier) {
+      sendCommand(CMD_PAGE_CHANGE, [8 + fi]);
+    }
+    favHeld = -1;
+    favUsedAsModifier = false;
+    return;
+  }
 }
 
 /* ============================================================================
@@ -692,6 +746,10 @@ function drawScreen() {
 
   drawParams();
   drawFooter();
+
+  if (favFeedbackTimer > 0) {
+    drawFavFeedback();
+  }
 
   if (overlayKnob >= 0 && overlayTimer > 0) {
     drawValueOverlay();
@@ -948,31 +1006,55 @@ function drawPageTabs() {
 }
 
 function drawFooter() {
-  // Separator line
-  draw_rect(0, 53, SCREEN_WIDTH, 1, 1);
-
-  // Device name (left), index (right)
-  const name = deviceName || "No Device";
-  print(1, 56, name, 1);
-  if (deviceCount > 0) {
-    const idx = `${deviceIndex + 1}/${deviceCount}`;
-    const idxW = text_width(idx);
-    print(SCREEN_WIDTH - idxW - 1, 56, idx, 1);
-  }
-
-  // Learn mode indicator (right)
-  if (learnMode) {
-    const learnText = "LEARN";
-    // Blink effect
-    if (Math.floor(tickCount / 15) % 2 === 0) {
-      const w = text_width(learnText);
-      fill_rect(SCREEN_WIDTH - w - 4, 55, w + 3, 9, 1);
-      print(SCREEN_WIDTH - w - 2, 56, learnText, 0);
+  // Fav tabs on left: "* 1" and "* 2" (styled like regular page tabs)
+  const favLabels = ["* 1", "* 2"];
+  const favTabW = 19;
+  const favTabGap = 1;
+  const favTabY = 55;
+  const favTabH = 9;
+  for (let i = 0; i < 2; i++) {
+    const x = i * (favTabW + favTabGap);
+    if (currentPage === 8 + i) {
+      fill_rect(x, favTabY, favTabW, favTabH, 1);
+      print(x + 1, favTabY + 1, favLabels[i], 0);
+    } else if (favStates[i] >= 1) {
+      print(x + 1, favTabY + 1, favLabels[i], 1);
     } else {
-      const w = text_width(learnText);
-      print(SCREEN_WIDTH - w - 2, 56, learnText, 1);
+      print(x + 1, favTabY + 1, favLabels[i], 1);
     }
   }
+
+  // Device name section: vertical line on left, horizontal line above
+  const nameLeft = 2 * (favTabW + favTabGap) + 4;
+  draw_rect(nameLeft, 53, 1, SCREEN_HEIGHT - 53, 1);            // vertical left edge
+  draw_rect(nameLeft, 53, SCREEN_WIDTH - nameLeft, 1, 1);       // horizontal top edge
+  const name = deviceName || "No Device";
+  set_clip_rect(nameLeft + 2, favTabY, SCREEN_WIDTH - nameLeft - 3, favTabH);
+  print(nameLeft + 3, favTabY + 1, name, 1);
+  clear_clip_rect();
+
+  // Learn mode indicator (overlays right side)
+  if (learnMode) {
+    const learnText = "LEARN";
+    if (Math.floor(tickCount / 15) % 2 === 0) {
+      const w = text_width(learnText);
+      fill_rect(SCREEN_WIDTH - w - 4, favTabY, w + 3, favTabH, 1);
+      print(SCREEN_WIDTH - w - 2, favTabY + 1, learnText, 0);
+    } else {
+      const w = text_width(learnText);
+      print(SCREEN_WIDTH - w - 2, favTabY + 1, learnText, 1);
+    }
+  }
+}
+
+function drawFavFeedback() {
+  const w = text_width(favFeedbackText) + 8;
+  const h = 12;
+  const x = Math.floor((SCREEN_WIDTH - w) / 2);
+  const y = 24;
+  fill_rect(x, y, w, h, 0);
+  draw_rect(x, y, w, h, 1);
+  print(x + 4, y + 2, favFeedbackText, 1);
 }
 
 function drawValueOverlay() {
@@ -1028,6 +1110,18 @@ function scheduleLEDs() {
     if (i === currentPage) {
       ledQueue.push(["pad", note, White]);
     } else if (i < pageCount) {
+      ledQueue.push(["pad", note, DarkGrey]);
+    } else {
+      ledQueue.push(["pad", note, Black]);
+    }
+  }
+
+  // Fav step LEDs (step 9-10) — same logic as regular step LEDs
+  for (let fi = 0; fi < 2; fi++) {
+    const note = FAV_STEP_NOTE_BASE + fi;
+    if (currentPage === 8 + fi) {
+      ledQueue.push(["pad", note, White]);
+    } else if (favStates[fi] >= 1) {
       ledQueue.push(["pad", note, DarkGrey]);
     } else {
       ledQueue.push(["pad", note, Black]);
@@ -1128,6 +1222,15 @@ function tick() {
   if (heartbeatTimer > HEARTBEAT_TIMEOUT_TICKS && connected) {
     connected = false;
     needsRedraw = true;
+  }
+
+  // Fav feedback countdown
+  if (favFeedbackTimer > 0) {
+    favFeedbackTimer--;
+    if (favFeedbackTimer === 0) {
+      favFeedbackText = "";
+      needsRedraw = true;
+    }
   }
 
   // Overlay auto-hide countdown (only when knob not touched)
