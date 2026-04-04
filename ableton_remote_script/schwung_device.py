@@ -84,6 +84,7 @@ class SchwungDeviceControl(ControlSurface):
         self._selected_device = None
         self._track_device_listener_installed = False
 
+        self._bindings_mtime = 0
         self._load_bindings()
         self._setup_listeners()
         self._schedule_heartbeat()
@@ -758,7 +759,24 @@ class SchwungDeviceControl(ControlSurface):
     def _heartbeat_tick(self):
         if self._connected:
             self._send_sysex(CMD_HEARTBEAT, [])
+        self._check_bindings_file()
         self._schedule_heartbeat()
+
+    def _check_bindings_file(self):
+        """Reload bindings.json if it was modified externally."""
+        try:
+            mtime = os.path.getmtime(BINDINGS_FILE)
+        except OSError:
+            return
+        if mtime == self._bindings_mtime:
+            return
+        self.log_message('SchwungDeviceControl: bindings.json changed, reloading')
+        self._load_bindings()
+        device = self._selected_device
+        if device:
+            self._apply_bindings_for_device(device)
+            if self._connected:
+                self._send_full_state()
 
     # =========================================================================
     # Hashing (adapted from roto_control)
@@ -791,8 +809,19 @@ class SchwungDeviceControl(ControlSurface):
 
     def _save_bindings(self):
         try:
+            # Sort pages by slot and knobs by index for readable JSON
+            sorted_bindings = {}
+            for device_hash, entry in self._bindings.items():
+                pages = entry.get('pages', [])
+                sorted_pages = sorted(pages, key=lambda p: p.get('slot', 0))
+                for page in sorted_pages:
+                    knobs = page.get('knobs', {})
+                    page['knobs'] = dict(sorted(knobs.items(), key=lambda kv: int(kv[0])))
+                sorted_bindings[device_hash] = {'pages': sorted_pages}
+            self._bindings = sorted_bindings
             with open(BINDINGS_FILE, 'w') as f:
                 json.dump(self._bindings, f, indent=2)
+            self._bindings_mtime = os.path.getmtime(BINDINGS_FILE)
             self.log_message('SchwungDeviceControl: bindings saved')
         except Exception as e:
             self.log_message('SchwungDeviceControl: save error: {}'.format(e))
@@ -822,6 +851,7 @@ class SchwungDeviceControl(ControlSurface):
             if migrated:
                 self._save_bindings()
                 self.log_message('SchwungDeviceControl: migrated bindings format')
+            self._bindings_mtime = os.path.getmtime(BINDINGS_FILE)
             self.log_message('SchwungDeviceControl: loaded {} device bindings'.format(
                 len(self._bindings)))
         except Exception as e:
