@@ -9,6 +9,7 @@ and SysEx with header F0 00 7D 01 for structured data.
 import hashlib
 import json
 import os
+import sys
 from time import sleep
 
 from _Framework.ControlSurface import ControlSurface
@@ -56,7 +57,13 @@ CMD_PAGE_SEQUENTIAL = 0x1A      # Move -> Live: 0x00=prev, 0x01=next (walks page
 CMD_RESET_PARAM = 0x1B          # Move -> Live: knob_idx (reset to default value)
 
 # Persistence
-BINDINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bindings.json')
+if sys.platform == 'darwin':
+    _CONFIG_DIR = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support', 'SchwungDeviceControl')
+elif sys.platform == 'win32':
+    _CONFIG_DIR = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'SchwungDeviceControl')
+else:
+    _CONFIG_DIR = os.path.join(os.environ.get('XDG_CONFIG_HOME', os.path.expanduser('~/.config')), 'SchwungDeviceControl')
+_DEVICES_DIR = os.path.join(_CONFIG_DIR, 'devices')
 
 # Timing
 HEARTBEAT_TICKS = 10  # ~1 second at 100ms/tick
@@ -90,7 +97,7 @@ class SchwungDeviceControl(ControlSurface):
         self._selected_device = None
         self._track_device_listener_installed = False
 
-        self._bindings_mtime = 0
+        self._bindings_mtimes = {}  # {device_hash: mtime}
         self._load_bindings()
         self._setup_listeners()
         self._schedule_heartbeat()
@@ -953,20 +960,35 @@ class SchwungDeviceControl(ControlSurface):
         self._schedule_heartbeat()
 
     def _check_bindings_file(self):
-        """Reload bindings.json if it was modified externally."""
-        try:
-            mtime = os.path.getmtime(BINDINGS_FILE)
-        except OSError:
+        """Reload any device binding files modified externally."""
+        if not os.path.isdir(_DEVICES_DIR):
             return
-        if mtime == self._bindings_mtime:
-            return
-        self.log_message('SchwungDeviceControl: bindings.json changed, reloading')
-        self._load_bindings()
-        device = self._selected_device
-        if device:
-            self._apply_bindings_for_device(device)
-            if self._connected:
-                self._send_full_state()
+        changed = False
+        for fname in os.listdir(_DEVICES_DIR):
+            if not fname.endswith('.json'):
+                continue
+            fpath = os.path.join(_DEVICES_DIR, fname)
+            try:
+                mtime = os.path.getmtime(fpath)
+            except OSError:
+                continue
+            device_hash = fname.rsplit('_', 1)[-1].replace('.json', '')
+            if self._bindings_mtimes.get(device_hash) == mtime:
+                continue
+            changed = True
+            try:
+                with open(fpath, 'r') as f:
+                    self._bindings[device_hash] = json.load(f)
+                self._bindings_mtimes[device_hash] = mtime
+                self.log_message('SchwungDeviceControl: reloaded {}'.format(fname))
+            except Exception as e:
+                self.log_message('SchwungDeviceControl: reload error {}: {}'.format(fname, e))
+        if changed:
+            device = self._selected_device
+            if device:
+                self._apply_bindings_for_device(device)
+                if self._connected:
+                    self._send_full_state()
 
     # =========================================================================
     # Hashing
@@ -994,14 +1016,31 @@ class SchwungDeviceControl(ControlSurface):
         return [ord(c) & 0x7F for c in s[:max_len]]
 
     # =========================================================================
-    # Persistence
+    # Persistence — per-device files in _DEVICES_DIR
     # =========================================================================
 
+    @staticmethod
+    def _sanitize_filename(name):
+        """Replace filesystem-unsafe characters with underscores."""
+        out = []
+        for c in name:
+            out.append(c if c.isalnum() or c in ' -.' else '_')
+        return ''.join(out).strip()
+
+    def _device_file_path(self, device_hash, device_name=''):
+        """Return path for a device binding file: <name>_<hash>.json"""
+        if not device_name:
+            entry = self._bindings.get(device_hash, {})
+            device_name = entry.get('deviceName', 'Unknown')
+        safe = self._sanitize_filename(device_name)
+        return os.path.join(_DEVICES_DIR, '{}_{}.json'.format(safe, device_hash))
+
     def _save_bindings(self):
+        if not os.path.isdir(_DEVICES_DIR):
+            os.makedirs(_DEVICES_DIR)
         try:
-            # Sort pages by slot and knobs by index for readable JSON
-            sorted_bindings = {}
             for device_hash, entry in self._bindings.items():
+                # Sort pages by slot and knobs by index for readable JSON
                 pages = entry.get('pages', [])
                 sorted_pages = sorted(pages, key=lambda p: p.get('slot', 0))
                 for page in sorted_pages:
@@ -1011,43 +1050,29 @@ class SchwungDeviceControl(ControlSurface):
                 if 'deviceName' in entry:
                     sorted_entry['deviceName'] = entry['deviceName']
                 sorted_entry['pages'] = sorted_pages
-                sorted_bindings[device_hash] = sorted_entry
-            self._bindings = sorted_bindings
-            with open(BINDINGS_FILE, 'w') as f:
-                json.dump(self._bindings, f, indent=2)
-            self._bindings_mtime = os.path.getmtime(BINDINGS_FILE)
+                self._bindings[device_hash] = sorted_entry
+                fpath = self._device_file_path(device_hash)
+                with open(fpath, 'w') as f:
+                    json.dump(sorted_entry, f, indent=2)
+                self._bindings_mtimes[device_hash] = os.path.getmtime(fpath)
             self.log_message('SchwungDeviceControl: bindings saved')
         except Exception as e:
             self.log_message('SchwungDeviceControl: save error: {}'.format(e))
 
     def _load_bindings(self):
-        if not os.path.exists(BINDINGS_FILE):
-            self._bindings = {}
+        self._bindings = {}
+        if not os.path.isdir(_DEVICES_DIR):
             return
-        try:
-            with open(BINDINGS_FILE, 'r') as f:
-                self._bindings = json.load(f)
-            # Migrate old format: device_hash -> {knob_idx: binding} to pages format
-            migrated = False
-            for device_hash, entry in self._bindings.items():
-                if 'pages' not in entry:
-                    # Old format — wrap all knobs into page 1
-                    self._bindings[device_hash] = {
-                        'pages': [{'name': '1', 'knobs': entry}]
-                    }
-                    migrated = True
-            # Migrate pages without slot field
-            for device_hash, entry in self._bindings.items():
-                for i, page in enumerate(entry.get('pages', [])):
-                    if 'slot' not in page:
-                        page['slot'] = i
-                        migrated = True
-            if migrated:
-                self._save_bindings()
-                self.log_message('SchwungDeviceControl: migrated bindings format')
-            self._bindings_mtime = os.path.getmtime(BINDINGS_FILE)
-            self.log_message('SchwungDeviceControl: loaded {} device bindings'.format(
-                len(self._bindings)))
-        except Exception as e:
-            self.log_message('SchwungDeviceControl: load error: {}'.format(e))
-            self._bindings = {}
+        for fname in os.listdir(_DEVICES_DIR):
+            if not fname.endswith('.json'):
+                continue
+            device_hash = fname.rsplit('_', 1)[-1].replace('.json', '')
+            fpath = os.path.join(_DEVICES_DIR, fname)
+            try:
+                with open(fpath, 'r') as f:
+                    self._bindings[device_hash] = json.load(f)
+                self._bindings_mtimes[device_hash] = os.path.getmtime(fpath)
+            except Exception as e:
+                self.log_message('SchwungDeviceControl: load error {}: {}'.format(fname, e))
+        self.log_message('SchwungDeviceControl: loaded {} device bindings'.format(
+            len(self._bindings)))
