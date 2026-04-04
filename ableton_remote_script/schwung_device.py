@@ -494,8 +494,10 @@ class SchwungDeviceControl(ControlSurface):
 
         # Store binding on current page
         if device_hash not in self._bindings:
-            self._bindings[device_hash] = {'pages': []}
+            self._bindings[device_hash] = {'deviceName': device.name, 'pages': []}
         device_entry = self._bindings[device_hash]
+        if 'deviceName' not in device_entry:
+            device_entry['deviceName'] = device.name
         if 'pages' not in device_entry:
             device_entry['pages'] = []
         pages = device_entry['pages']
@@ -893,7 +895,11 @@ class SchwungDeviceControl(ControlSurface):
                 for page in sorted_pages:
                     knobs = page.get('knobs', {})
                     page['knobs'] = dict(sorted(knobs.items(), key=lambda kv: int(kv[0])))
-                sorted_bindings[device_hash] = {'pages': sorted_pages}
+                sorted_entry = {}
+                if 'deviceName' in entry:
+                    sorted_entry['deviceName'] = entry['deviceName']
+                sorted_entry['pages'] = sorted_pages
+                sorted_bindings[device_hash] = sorted_entry
             self._bindings = sorted_bindings
             with open(BINDINGS_FILE, 'w') as f:
                 json.dump(self._bindings, f, indent=2)
