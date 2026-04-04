@@ -346,8 +346,6 @@ class SchwungDeviceControl(ControlSurface):
             self.log_message('SchwungDeviceControl: param not found in device')
             return
 
-        # Compute hashes for persistence
-        param_hash = self._get_param_hash(param.name)
         device_hash = self._get_device_hash(device)
 
         # Store binding on current page
@@ -362,7 +360,6 @@ class SchwungDeviceControl(ControlSurface):
             pages.append({'name': '{}'.format(len(pages) + 1), 'knobs': {}})
         pages[self._current_page]['knobs'][str(knob_idx)] = {
             'param_index': param_index,
-            'param_hash': param_hash.hex(),
             'param_name': param.name,
             'short_name': param.name
         }
@@ -501,13 +498,13 @@ class SchwungDeviceControl(ControlSurface):
         return fallback
 
     def _resolve_param(self, device, binding):
-        """Resolve a binding to a live parameter, using hash then falling back to index."""
-        param_hash_hex = binding['param_hash']
+        """Resolve a binding to a live parameter, using name then falling back to index."""
+        param_name = binding['param_name']
         param_index = binding['param_index']
 
-        # Try hash match first
-        for i, p in enumerate(device.parameters):
-            if self._get_param_hash(p.name).hex() == param_hash_hex:
+        # Try name match first
+        for p in device.parameters:
+            if p.name == param_name:
                 return p
 
         # Fall back to index
@@ -614,9 +611,6 @@ class SchwungDeviceControl(ControlSurface):
     # Hashing (adapted from roto_control)
     # =========================================================================
 
-    def _get_param_hash(self, param_name):
-        h = hashlib.sha1(param_name.encode('utf-8')).digest()
-        return bytes([b & 0x7F for b in h[:6]])
 
     def _get_device_hash(self, device):
         key = '{}:{}'.format(device.class_name, device.name)
