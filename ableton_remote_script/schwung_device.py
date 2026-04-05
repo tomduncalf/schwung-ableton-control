@@ -191,19 +191,23 @@ class SchwungDeviceControl(ControlSurface):
         self._pad_mode = mode
         mode_names = {PAD_MODE_OFF: 'OFF', PAD_MODE_NOTE: 'NOTE', PAD_MODE_SESSION: 'SESSION'}
         self.log_message('SchwungDeviceControl: pad mode {}'.format(mode_names.get(mode, mode)))
+        note_modes = self.component_map['Note_Modes']
         try:
             if mode == PAD_MODE_NOTE:
                 self.set_can_auto_arm(True)
                 self.set_can_update_controlled_track(True)
-                self.component_map['Note_Modes'].selected_mode = 'keyboard'
+                if note_modes.selected_mode != 'keyboard':
+                    note_modes.selected_mode = 'keyboard'
                 self._send_note_layout_info()
             elif mode == PAD_MODE_SESSION:
                 self.set_can_auto_arm(False)
                 self.set_can_update_controlled_track(False)
-                self.component_map['Note_Modes'].selected_mode = 'session'
+                if note_modes.selected_mode != 'session':
+                    note_modes.selected_mode = 'session'
                 self._send_session_grid_colors()
             else:
-                self.component_map['Note_Modes'].selected_mode = None
+                if note_modes.selected_mode is not None:
+                    note_modes.selected_mode = None
                 self.set_can_auto_arm(False)
                 self.set_can_update_controlled_track(False)
         except Exception as e:
@@ -1708,7 +1712,7 @@ class SchwungDeviceControl(ControlSurface):
         self._device_page_memory = {}
         self._current_page = 0
         self._current_slot = 0
-        self._set_pad_mode(PAD_MODE_NOTE)
+        self._set_pad_mode(self._pad_mode)
         self._on_device_changed()
 
     def _schedule_heartbeat(self):

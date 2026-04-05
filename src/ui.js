@@ -1667,10 +1667,16 @@ const SESSION_LED_MAP = [
 ];
 
 function updateSessionPadLEDs() {
+  // Colors arrive as row 0 (scene 0) first, 8 per row.
+  // Physical pads: note 68-75 = bottom row, 92-99 = top row.
+  // Scene 0 should display on the top row, so flip vertically.
   for (let i = 0; i < 32; i++) {
+    const row = Math.floor(i / 8);
+    const col = i % 8;
+    const flippedRow = 3 - row;
     const colorIdx = sessionGridColors[i] || 0;
     const ledColor = SESSION_LED_MAP[colorIdx] || Black;
-    setLED(PAD_NOTE_START + i, ledColor);
+    setLED(PAD_NOTE_START + flippedRow * 8 + col, ledColor);
   }
 }
 
