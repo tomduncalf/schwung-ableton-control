@@ -1345,6 +1345,10 @@ class SchwungDeviceControl(ControlSurface):
         fav_active_sub = 0
         if current_slot == 8 and self._current_page >= 0 and self._current_page in fav_pages:
             fav_active_sub = fav_pages.index(self._current_page)
+        elif current_slot != 8 and fav_pages:
+            remembered = self._slot_page_memory.get(device_hash, {}).get(8)
+            if remembered is not None and remembered in fav_pages:
+                fav_active_sub = fav_pages.index(remembered)
         # Set slot info (slot 9, with subpages)
         set_pages = self._set_bindings.get('pages', [])
         if current_slot == 9:
@@ -1354,7 +1358,11 @@ class SchwungDeviceControl(ControlSurface):
         else:
             set_state = 0
         set_sub_count = len(set_pages)
-        set_active_sub = max(0, self._current_page) if current_slot == 9 else 0
+        if current_slot == 9:
+            set_active_sub = max(0, self._current_page)
+        else:
+            remembered = self._slot_page_memory.get(device_hash, {}).get(9)
+            set_active_sub = max(0, remembered) if remembered is not None else 0
         self._send_sysex(CMD_PAGE_INFO, [current_slot, slot_count,
                                          fav_state + 1, fav_sub_count + 1, fav_active_sub + 1,
                                          set_state + 1, set_sub_count + 1, set_active_sub + 1])
