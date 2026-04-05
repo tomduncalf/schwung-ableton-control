@@ -31,6 +31,7 @@ import {
   MoveMainKnob,
   MoveMainButton,
   MoveDelete,
+  MoveRow3,
   MoveRow4,
   White,
   Black,
@@ -66,6 +67,7 @@ const CMD_PARAM_VALUE_STRING = 0x0b;
 const CMD_PARAM_STEPS = 0x0c;
 const CMD_SLOT_SUBPAGE_INFO = 0x0d;
 const CMD_DEVICE_LIST_RESPONSE = 0x0e;
+const CMD_TRACK_LIST_RESPONSE = 0x12;
 
 // Note commands: Live -> Move (simple data — note=cmd, velocity=value)
 const CMD_HEARTBEAT = 0x07;       // vel = 1
@@ -88,6 +90,10 @@ const CMD_DEVICE_LIST_REQUEST = 0x1c;  // vel = offset + 1
 const CMD_DEVICE_SELECT = 0x1d;        // vel = device_index + 1
 const CMD_FAV_ADD = 0x1e;              // vel = fav_index * 16 + knob_idx + 1
 const CMD_SET_ADD = 0x1f;              // vel = set_index * 16 + knob_idx + 1
+
+// Track browser commands
+const CMD_TRACK_LIST_REQUEST = 0x23;   // vel = offset + 1
+const CMD_TRACK_SELECT = 0x24;         // vel = track_index + 1
 
 // Note mode commands
 const CMD_NOTE_MODE = 0x21;            // vel = 1+1 (on) or 0+1 (off)
@@ -169,6 +175,14 @@ class HoldToggle {
     this.active = false;
     this._onDeactivate();
   }
+
+  /** Close if toggled on (not held). For auto-close after item selection. */
+  closeIfToggled() {
+    if (this.active && !this._held) {
+      this.active = false;
+      this._onDeactivate();
+    }
+  }
 }
 
 /* ============================================================================
@@ -248,6 +262,7 @@ let deviceBrowseTotal = 0;   // total device count
 let deviceBrowseNames = new Array(8).fill(""); // names for current page of 8
 
 function enterDeviceBrowse() {
+  trackBrowseToggle.deactivate();
   deviceBrowseOffset = 0;
   sendNote(CMD_DEVICE_LIST_REQUEST, 0 + 1);
   needsRedraw = true;
@@ -263,6 +278,30 @@ function exitDeviceBrowse() {
 }
 
 const deviceBrowseToggle = new HoldToggle(enterDeviceBrowse, exitDeviceBrowse);
+
+// Track browser state
+let trackBrowseOffset = 0;
+let trackBrowseTotal = 0;
+let trackBrowseNames = new Array(8).fill("");
+let trackBrowseCurrentIndex = -1; // index of currently selected track
+
+function enterTrackBrowse() {
+  deviceBrowseToggle.deactivate();
+  trackBrowseOffset = 0;
+  sendNote(CMD_TRACK_LIST_REQUEST, 0 + 1);
+  needsRedraw = true;
+}
+
+function exitTrackBrowse() {
+  updateStepLEDs();
+  updateKnobLEDs();
+  updateNavLEDs();
+  setButtonLED(MoveMenu, WhiteLedBright);
+  setButtonLED(MoveBack, WhiteLedBright);
+  needsRedraw = true;
+}
+
+const trackBrowseToggle = new HoldToggle(enterTrackBrowse, exitTrackBrowse);
 
 // Progressive LED init
 let ledInitPending = true;
@@ -293,6 +332,7 @@ function resetUIState() {
   overlayValueStr = "";
   overlayTimer = 0;
   deviceBrowseToggle.deactivate();
+  trackBrowseToggle.deactivate();
   touchStack = [];
   touchedKnob = -1;
   marqueeOffset = 0;
@@ -562,6 +602,27 @@ function handleSysEx(msg) {
       }
       break;
 
+    case CMD_TRACK_LIST_RESPONSE:
+      // [offset, total, current_track_index, name1\0, name2\0, ...]
+      if (payload.length >= 3) {
+        trackBrowseOffset = payload[0];
+        trackBrowseTotal = payload[1];
+        trackBrowseCurrentIndex = payload[2];
+        trackBrowseNames.fill("");
+        let trackNameIdx = 0;
+        let trackStrStart = 3;
+        for (let i = 3; i < payload.length && trackNameIdx < 8; i++) {
+          if (payload[i] === 0) {
+            trackBrowseNames[trackNameIdx] = decodeString(payload.slice(trackStrStart, i + 1));
+            trackNameIdx++;
+            trackStrStart = i + 1;
+          }
+        }
+        updateTrackBrowseLEDs();
+        needsRedraw = true;
+      }
+      break;
+
     case CMD_NOTE_LAYOUT_INFO:
       // [root_note, is_in_key, interval, scale_note0, scale_note1, ...]
       if (payload.length >= 3) {
@@ -682,6 +743,20 @@ function handleInternalCC(cc, value) {
     return;
   }
 
+  // Row 3 button (MoveRow3 = CC 41) — track browser (short press = toggle, long press = momentary)
+  if (cc === MoveRow3) {
+    if (value > 63) {
+      if (trackBrowseToggle.active) {
+        trackBrowseToggle.toggleOff();
+      } else {
+        trackBrowseToggle.press();
+      }
+    } else {
+      trackBrowseToggle.release();
+    }
+    return;
+  }
+
   // In device browse mode, intercept arrows for paging
   if (deviceBrowseToggle.active) {
     if (cc === MoveLeft && value > 63) {
@@ -698,6 +773,25 @@ function handleInternalCC(cc, value) {
       return;
     }
     // Absorb all other CCs in browse mode (knobs, back, menu, etc.)
+    return;
+  }
+
+  // In track browse mode, intercept arrows for paging
+  if (trackBrowseToggle.active) {
+    if (cc === MoveLeft && value > 63) {
+      if (trackBrowseOffset > 0) {
+        const newOffset = Math.max(0, trackBrowseOffset - 8);
+        sendNote(CMD_TRACK_LIST_REQUEST, newOffset + 1);
+      }
+      return;
+    }
+    if (cc === MoveRight && value > 63) {
+      if (trackBrowseOffset + 8 < trackBrowseTotal) {
+        sendNote(CMD_TRACK_LIST_REQUEST, trackBrowseOffset + 8 + 1);
+      }
+      return;
+    }
+    // Absorb all other CCs in browse mode
     return;
   }
 
@@ -884,6 +978,19 @@ function handleInternalNoteOn(note, velocity) {
       const devIdx = deviceBrowseOffset + slotIdx;
       if (devIdx < deviceBrowseTotal && deviceBrowseNames[slotIdx]) {
         sendNote(CMD_DEVICE_SELECT, devIdx + 1);
+        deviceBrowseToggle.closeIfToggled();
+      }
+      return;
+    }
+    // In track browse mode, select track
+    if (trackBrowseToggle.active) {
+      const trkIdx = trackBrowseOffset + slotIdx;
+      if (trkIdx < trackBrowseTotal && trackBrowseNames[slotIdx]) {
+        sendNote(CMD_TRACK_SELECT, trkIdx + 1);
+        trackBrowseCurrentIndex = trkIdx;
+        updateTrackBrowseLEDs();
+        needsRedraw = true;
+        trackBrowseToggle.closeIfToggled();
       }
       return;
     }
@@ -982,6 +1089,11 @@ function drawScreen() {
     return;
   }
 
+  if (trackBrowseToggle.active) {
+    drawTrackBrowser();
+    return;
+  }
+
   drawParams();
   drawFooter();
 
@@ -1049,6 +1161,58 @@ function updateDeviceBrowseLEDs() {
   // Arrow LEDs: show if more pages exist
   setButtonLED(MoveLeft, deviceBrowseOffset > 0 ? WhiteLedBright : Black);
   setButtonLED(MoveRight, deviceBrowseOffset + 8 < deviceBrowseTotal ? WhiteLedBright : Black);
+}
+
+function drawTrackBrowser() {
+  const colW = 63;
+  const startY = 1;
+  const rowH = 12;
+
+  for (let i = 0; i < 8; i++) {
+    const name = trackBrowseNames[i];
+    if (!name) continue;
+
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const x = col * (colW + 2);
+    const y = startY + row * rowH;
+
+    const label = (trackBrowseOffset + i + 1) + " " + name;
+    const isCurrentTrack = (trackBrowseOffset + i) === trackBrowseCurrentIndex;
+    if (isCurrentTrack) {
+      fill_rect(x, y - 1, colW, rowH - 1, 1);
+      set_clip_rect(x, y - 1, colW, rowH - 1);
+      print(x + 2, y, label, 0);
+      clear_clip_rect();
+    } else {
+      set_clip_rect(x, y - 1, colW, rowH - 1);
+      print(x + 2, y, label, 1);
+      clear_clip_rect();
+    }
+  }
+
+  draw_rect(0, 53, SCREEN_WIDTH, 1, 1);
+  const hint = "Step 1-8 to select";
+  print(1, 56, hint, 1);
+}
+
+function updateTrackBrowseLEDs() {
+  if (!trackBrowseToggle.active) return;
+  for (let i = 0; i < 8; i++) {
+    const note = STEP_NOTE_BASE + i;
+    const trkIdx = trackBrowseOffset + i;
+    if (trkIdx < trackBrowseTotal && trackBrowseNames[i]) {
+      if (trkIdx === trackBrowseCurrentIndex) {
+        setLED(note, White);
+      } else {
+        setLED(note, DarkGrey);
+      }
+    } else {
+      setLED(note, Black);
+    }
+  }
+  setButtonLED(MoveLeft, trackBrowseOffset > 0 ? WhiteLedBright : Black);
+  setButtonLED(MoveRight, trackBrowseOffset + 8 < trackBrowseTotal ? WhiteLedBright : Black);
 }
 
 function drawDisconnected() {
@@ -1538,6 +1702,7 @@ function tick() {
 
   // HoldToggle timers
   deviceBrowseToggle.tick();
+  trackBrowseToggle.tick();
 
   // Heartbeat watchdog
   heartbeatTimer++;

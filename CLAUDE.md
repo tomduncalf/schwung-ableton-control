@@ -153,12 +153,17 @@ When the condition parameter changes, bindings re-apply automatically.
 - **Shift+Up/Down:** octave up/down (CMD_OCTAVE, note mode only)
 - **Main wheel (CC 14):** sequential page/subpage navigation (wraps around)
 - **Left/Right (CC 119-120):** device navigation
-- **Track 4 hold (CC 43):** device browser modifier — shows device list, step 1-8 selects device, arrows page through 8-device pages
+- **Row 4 (CC 40, bottom):** device browser — short press toggles, long press momentary. Step 1-8 selects device, arrows page through 8-device groups
+- **Row 3 (CC 41):** track browser — short press toggles, long press momentary. Step 1-8 selects track, arrows page through 8-track groups
 - **Back (CC 120):** exit module
 
 ## Device Browser Mode
 
-Hold Track 4 to enter device browser. Move requests device names via `CMD_DEVICE_LIST_REQUEST(offset)`, Ableton responds with `CMD_DEVICE_LIST_RESPONSE(offset, total, name1\0, name2\0, ...)`. Step buttons select a device (`CMD_DEVICE_SELECT(index)`). Left/right arrows page through groups of 8. Releasing Track 4 exits browse mode and restores normal display/LEDs.
+Press Row 4 (bottom) to enter device browser. Short press toggles it on/off; long press (~300ms) is momentary (active while held). Move requests device names via `CMD_DEVICE_LIST_REQUEST(offset)`, Ableton responds with `CMD_DEVICE_LIST_RESPONSE(offset, total, name1\0, name2\0, ...)`. Step buttons select a device (`CMD_DEVICE_SELECT(index)`). Left/right arrows page through groups of 8.
+
+## Track Browser Mode
+
+Press Row 3 to enter track browser. Same toggle/momentary behavior as device browser (HoldToggle). Move requests track names via `CMD_TRACK_LIST_REQUEST(offset)`, Ableton responds with `CMD_TRACK_LIST_RESPONSE(offset, total, current_track_index, name1\0, name2\0, ...)`. Step buttons select a track (`CMD_TRACK_SELECT(index)`). Left/right arrows page through groups of 8. Device and track browsers are mutually exclusive.
 
 ## Learn Mode Flow
 

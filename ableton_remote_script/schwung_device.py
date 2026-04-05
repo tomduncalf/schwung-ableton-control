@@ -63,6 +63,11 @@ CMD_DEVICE_SELECT = 0x1D
 CMD_FAV_ADD = 0x1E          # vel = fav_index * 16 + knob_idx + 1
 CMD_SET_ADD = 0x1F          # vel = set_index * 16 + knob_idx + 1
 
+# Track browser commands
+CMD_TRACK_LIST_REQUEST = 0x23   # Move -> Live: vel = offset + 1
+CMD_TRACK_SELECT = 0x24         # Move -> Live: vel = track_index + 1
+CMD_TRACK_LIST_RESPONSE = 0x12  # SysEx: Live -> Move
+
 # Note mode commands
 CMD_NOTE_MODE = 0x21        # Move -> Live: vel = 1+1 (on) or 0+1 (off)
 CMD_OCTAVE = 0x22           # Move -> Live: vel = 1+1 (up) or 0+1 (down)
@@ -291,7 +296,8 @@ class SchwungDeviceControl(ControlSurface):
                       CMD_REQUEST_STATE, CMD_UNMAP_KNOB, CMD_NAV_DEVICE,
                       CMD_PAGE_CHANGE, CMD_REQUEST_VALUE_STRING, CMD_PAGE_SEQUENTIAL,
                       CMD_RESET_PARAM, CMD_DEVICE_LIST_REQUEST, CMD_DEVICE_SELECT,
-                      CMD_FAV_ADD, CMD_SET_ADD, CMD_NOTE_MODE, CMD_OCTAVE]:
+                      CMD_FAV_ADD, CMD_SET_ADD, CMD_NOTE_MODE, CMD_OCTAVE,
+                      CMD_TRACK_LIST_REQUEST, CMD_TRACK_SELECT]:
             Live.MidiMap.forward_midi_note(self._c_instance.handle(), midi_map_handle, MIDI_CHANNEL, note)
         # Forward knob value CCs 0-7 (ch16)
         for cc in KNOB_VALUE_CCS:
@@ -385,6 +391,10 @@ class SchwungDeviceControl(ControlSurface):
             self._set_note_mode(v > 0)
         elif note == CMD_OCTAVE:
             self._handle_octave(v)
+        elif note == CMD_TRACK_LIST_REQUEST:
+            self._send_track_list(v)
+        elif note == CMD_TRACK_SELECT:
+            self._select_track_by_index(v)
 
     def _process_sysex(self, midi_bytes):
         self.log_message('SchwungDeviceControl SYSEX len={}: {}'.format(
@@ -481,6 +491,45 @@ class SchwungDeviceControl(ControlSurface):
             return
         device = self._device_list[index]
         self.song.view.select_device(device)
+
+    # =========================================================================
+    # Track traversal
+    # =========================================================================
+
+    def _get_track_list(self):
+        """Return visible tracks (audio, MIDI, return, master)."""
+        tracks = []
+        for track in self.song.visible_tracks:
+            tracks.append(track)
+        for track in self.song.return_tracks:
+            tracks.append(track)
+        tracks.append(self.song.master_track)
+        return tracks
+
+    def _send_track_list(self, offset):
+        """Send up to 8 track names starting at offset."""
+        tracks = self._get_track_list()
+        total = len(tracks)
+        selected = self.song.view.selected_track
+        current_index = 0
+        try:
+            current_index = tracks.index(selected)
+        except ValueError:
+            pass
+        payload = [min(127, offset), min(127, total), min(127, current_index)]
+        for i in range(8):
+            idx = offset + i
+            if idx < total:
+                name = tracks[idx].name
+                payload += self._encode_string(name, 14) + [0]
+        self._send_sysex(CMD_TRACK_LIST_RESPONSE, payload)
+
+    def _select_track_by_index(self, index):
+        """Select a track by its index in the track list."""
+        tracks = self._get_track_list()
+        if index < 0 or index >= len(tracks):
+            return
+        self.song.view.selected_track = tracks[index]
 
     def _handle_page_change(self, slot_idx):
         if slot_idx < 0 or slot_idx >= 12:
