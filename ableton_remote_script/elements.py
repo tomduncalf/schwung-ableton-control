@@ -18,5 +18,5 @@ class Elements(ElementsBase):
             'Pads',
             msg_type=MIDI_NOTE_TYPE,
             is_rgb=True,
-            channel=PAD_CHANNEL,
+            channels=PAD_CHANNEL,
         )

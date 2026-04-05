@@ -9,6 +9,7 @@ and SysEx with header F0 00 7D 01 for structured data.
 import copy
 import hashlib
 import json
+import logging
 import os
 import sys
 from time import sleep
@@ -16,6 +17,8 @@ from time import sleep
 import Live
 from ableton.v3.base import const
 from ableton.v3.control_surface import ControlSurface
+
+logger = logging.getLogger(__name__)
 from .keyboard import NoteLayout
 
 # MIDI protocol constants
@@ -84,6 +87,10 @@ MAX_PARAM_NAME_LEN = 12
 
 
 class SchwungDeviceControl(ControlSurface):
+    preferences_key = 'SchwungDeviceControl'
+
+    def log_message(self, *msg):
+        logger.info(' '.join(str(m) for m in msg))
 
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
@@ -183,20 +190,20 @@ class SchwungDeviceControl(ControlSurface):
     # =========================================================================
 
     def _setup_listeners(self):
-        self.song().view.add_selected_track_listener(self._on_track_changed)
+        self.song.view.add_selected_track_listener(self._on_track_changed)
         self._install_device_listener()
 
     def _install_device_listener(self):
         if self._track_device_listener_installed:
             return
-        track = self.song().view.selected_track
+        track = self.song.view.selected_track
         if track:
             track.view.add_selected_device_listener(self._on_device_changed)
             self._track_device_listener_installed = True
 
     def _remove_device_listeners(self):
         try:
-            track = self.song().view.selected_track
+            track = self.song.view.selected_track
             if track and self._track_device_listener_installed:
                 track.view.remove_selected_device_listener(self._on_device_changed)
         except:
@@ -246,7 +253,7 @@ class SchwungDeviceControl(ControlSurface):
 
     def _get_device_list(self):
         devices = []
-        track = self.song().view.selected_track
+        track = self.song.view.selected_track
         if track:
             for device in track.devices:
                 self._traverse_chains(device, devices)
@@ -260,7 +267,7 @@ class SchwungDeviceControl(ControlSurface):
                     self._traverse_chains(nested, devices)
 
     def _get_selected_device(self):
-        track = self.song().view.selected_track
+        track = self.song.view.selected_track
         if track:
             return track.view.selected_device
         return None
@@ -293,7 +300,7 @@ class SchwungDeviceControl(ControlSurface):
     # MIDI receive
     # =========================================================================
 
-    def receive_midi(self, midi_bytes):
+    def process_midi_bytes(self, midi_bytes, midi_processor):
         if len(midi_bytes) < 1:
             return
 
@@ -321,8 +328,8 @@ class SchwungDeviceControl(ControlSurface):
                         self._handle_knob_value(cc, value)
                         return
 
-        # Pass through everything else
-        super(SchwungDeviceControl, self).receive_midi(midi_bytes)
+        # Pass through everything else (pad notes, etc.)
+        super().process_midi_bytes(midi_bytes, midi_processor)
 
     def _process_note_command(self, note, vel):
         """Dispatch Note On messages as commands (note=cmd, vel=value with +1 offset)."""
@@ -447,7 +454,7 @@ class SchwungDeviceControl(ControlSurface):
         device = self._device_list[self._device_index]
 
         # Select the device in Live
-        self.song().view.select_device(device)
+        self.song.view.select_device(device)
 
     def _send_device_list(self, offset):
         """Send up to 8 device names starting at offset."""
@@ -467,7 +474,7 @@ class SchwungDeviceControl(ControlSurface):
         if index < 0 or index >= len(self._device_list):
             return
         device = self._device_list[index]
-        self.song().view.select_device(device)
+        self.song.view.select_device(device)
 
     def _handle_page_change(self, slot_idx):
         if slot_idx < 0 or slot_idx >= 12:
@@ -802,7 +809,7 @@ class SchwungDeviceControl(ControlSurface):
 
     def _find_device_by_hash(self, device_hash):
         """Find a device anywhere in the set by its hash."""
-        for track in list(self.song().tracks) + list(self.song().return_tracks) + [self.song().master_track]:
+        for track in list(self.song.tracks) + list(self.song.return_tracks) + [self.song.master_track]:
             for device in track.devices:
                 found = self._search_device_recursive(device, device_hash)
                 if found:
@@ -823,7 +830,7 @@ class SchwungDeviceControl(ControlSurface):
     def _get_set_dir(self):
         """Get the project directory for the current set."""
         try:
-            file_path = self.song().file_path
+            file_path = self.song.file_path
             if file_path:
                 return os.path.dirname(file_path)
         except:
@@ -833,7 +840,7 @@ class SchwungDeviceControl(ControlSurface):
     def _get_set_bindings_path(self):
         """Get the bindings path for the current set file."""
         try:
-            file_path = self.song().file_path
+            file_path = self.song.file_path
             if not file_path:
                 return None
             base = os.path.splitext(os.path.basename(file_path))[0]
@@ -886,7 +893,7 @@ class SchwungDeviceControl(ControlSurface):
             self._set_bindings_source_path = None
             self._set_bindings_mtime = None
         try:
-            self._set_file_path_cache = self.song().file_path
+            self._set_file_path_cache = self.song.file_path
         except:
             self._set_file_path_cache = None
 
@@ -909,7 +916,7 @@ class SchwungDeviceControl(ControlSurface):
     def _check_set_file_changed(self):
         """Check if the song file changed (e.g. opened new set) and reload."""
         try:
-            current = self.song().file_path
+            current = self.song.file_path
         except:
             current = None
         if current != self._set_file_path_cache:
@@ -968,7 +975,7 @@ class SchwungDeviceControl(ControlSurface):
             return
 
         # Get the currently selected/focused parameter in Live
-        param = self.song().view.selected_parameter
+        param = self.song.view.selected_parameter
         device = self._get_selected_device()
         self.log_message('SchwungDeviceControl: param={} device={}'.format(
             param.name if param else None,
@@ -1049,7 +1056,7 @@ class SchwungDeviceControl(ControlSurface):
 
     def _learn_set_knob(self, knob_idx):
         """Learn a knob on the current set page (cross-device binding)."""
-        param = self.song().view.selected_parameter
+        param = self.song.view.selected_parameter
         device = self._get_selected_device()
         if param is None or device is None:
             return

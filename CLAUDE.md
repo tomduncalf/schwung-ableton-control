@@ -210,3 +210,7 @@ After any change to `ableton_remote_script/`, deploy to Ableton with:
 ./scripts/install_remote_script.sh
 ```
 Then restart Ableton. This preserves `bindings.json` if present.
+
+## Reference
+
+Ableton Live 12 built-in MIDI Remote Scripts (decompiled) are at `../../ableton_remote_scripts/AbletonLive12_MIDIRemoteScripts/`. Use these as reference for v3 framework patterns (elements, mappings, components, etc.).
