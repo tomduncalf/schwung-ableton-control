@@ -1,22 +1,19 @@
 from __future__ import absolute_import, print_function, unicode_literals
+from .colors import Rgb
 
 
 class Skin:
 
     class DefaultButton:
-        On = 'DefaultButton.On'
-        Off = 'DefaultButton.Off'
-        Pressed = 'DefaultButton.Pressed'
+        On = Rgb.WHITE
+        Off = Rgb.OFF
+        Pressed = Rgb.WHITE
 
     class Instrument:
-        NoteBase = 'Instrument.NoteBase'
-        NoteScale = 'Instrument.NoteScale'
-        NoteNotScale = 'Instrument.NoteNotScale'
-        NoteInvalid = 'Instrument.NoteInvalid'
-        NoteSelected = 'Instrument.NoteSelected'
-        NoteInStep = 'Instrument.NoteInStep'
-        PadAction = 'Instrument.PadAction'
-
-    class Keyboard:
-        Natural = 'Keyboard.Natural'
-        Sharp = 'Keyboard.Sharp'
+        PadAction = Rgb.WHITE
+        NoteBase = Rgb.GREEN
+        NoteScale = Rgb.DIM_WHITE
+        NoteNotScale = Rgb.OFF
+        NoteInvalid = Rgb.OFF
+        NoteSelected = Rgb.WHITE
+        NoteInStep = Rgb.WHITE

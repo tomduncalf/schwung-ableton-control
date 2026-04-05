@@ -1,2 +1,6 @@
 - Note entry
-- Code review
+- Track select
+- Snapshot/morph?
+- > 1 Move connected
+- Wifi?
+- Help

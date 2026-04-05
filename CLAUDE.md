@@ -213,4 +213,5 @@ Then restart Ableton. This preserves `bindings.json` if present.
 
 ## Reference
 
-Ableton Live 12 built-in MIDI Remote Scripts (decompiled) are at `../../ableton_remote_scripts/AbletonLive12_MIDIRemoteScripts/`. Use these as reference for v3 framework patterns (elements, mappings, components, etc.).
+- **Official Move remote script** (decompiled): `../../ableton_remote_scripts/Move/` — the script we're replicating; shows how Move handles note modes, auto-arm, instrument/drum switching, etc.
+- **All built-in MIDI Remote Scripts** (decompiled): `../../ableton_remote_scripts/AbletonLive12_MIDIRemoteScripts/` — reference for v3 framework patterns (elements, mappings, components, etc.). ATOM is a good simple v3 example.

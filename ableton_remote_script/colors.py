@@ -1,12 +1,14 @@
 from __future__ import absolute_import, print_function, unicode_literals
 
+from ableton.v3.control_surface.elements.color import RgbColor
+
 
 class Rgb:
-    GREEN = (0, 127, 0)
-    RED = (127, 0, 0)
-    OFF = (0, 0, 0)
-    WHITE = (127, 127, 127)
-    YELLOW = (127, 127, 0)
-    BLUE = (0, 0, 127)
-    CYAN = (0, 127, 127)
-    DIM_WHITE = (40, 40, 40)
+    GREEN = RgbColor(0, 127, 0)
+    RED = RgbColor(127, 0, 0)
+    OFF = RgbColor(0, 0, 0)
+    WHITE = RgbColor(127, 127, 127)
+    YELLOW = RgbColor(127, 127, 0)
+    BLUE = RgbColor(0, 0, 127)
+    CYAN = RgbColor(0, 127, 127)
+    DIM_WHITE = RgbColor(40, 40, 40)
