@@ -195,6 +195,7 @@ let heartbeatTimer = 0;
 let reconnectTimer = 0;
 let learnMode = false;
 let noteMode = true;
+let helpMode = false;
 
 // Note layout info (from Ableton, for pad coloring)
 let noteLayoutRoot = 0;
@@ -816,6 +817,13 @@ function handleInternalCC(cc, value) {
     return;
   }
 
+  // Menu button - toggle help overlay
+  if (cc === MoveMenu && value > 63) {
+    helpMode = !helpMode;
+    needsRedraw = true;
+    return;
+  }
+
   // Arrow keys - device navigation
   if (cc === MoveLeft && value > 63) {
     sendNote(CMD_NAV_DEVICE, 0x00 + 1); // left = -1
@@ -1077,11 +1085,23 @@ function handleInternalNoteOff(note) {
  * Display Drawing (128x64, 1-bit)
  * ============================================================================ */
 
+function drawHelp() {
+  const title = "Help";
+  const line = "T1: Learn  T3: Track  T4: Device";
+  print(Math.floor((SCREEN_WIDTH - text_width(title)) / 2), 16, title, 1);
+  print(Math.floor((SCREEN_WIDTH - text_width(line)) / 2), 32, line, 1);
+}
+
 function drawScreen() {
   clear_screen();
 
   if (!connected) {
     drawDisconnected();
+    return;
+  }
+
+  if (helpMode) {
+    drawHelp();
     return;
   }
 
