@@ -305,6 +305,8 @@ class SchwungDeviceControl(ControlSurface):
                         slot.clip.fire()
                 elif tracks[track_idx].arm:
                     slot.fire()  # record into empty armed slot
+                else:
+                    tracks[track_idx].stop_all_clips()  # stop track
         except Exception as e:
             self.log_message('SchwungDeviceControl: session pad error: {}'.format(e))
 
