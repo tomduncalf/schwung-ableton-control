@@ -19,14 +19,17 @@ class Skin:
         NoteInStep = Rgb.WHITE
 
     class Session:
+        # All OFF — we send grid colors via custom SysEx, not the v3 skin system.
+        # Non-OFF values here cause the framework to send RGB MIDI that Move
+        # misinterprets as LED data, producing "noise" on the pad grid.
         Slot = Rgb.OFF
-        SlotRecordButton = Rgb.RED
+        SlotRecordButton = Rgb.OFF
         NoSlot = Rgb.OFF
-        ClipStopped = Rgb.YELLOW
-        ClipTriggeredPlay = Rgb.DIM_GREEN
-        ClipTriggeredRecord = Rgb.DIM_RED
-        ClipPlaying = Rgb.GREEN
-        ClipRecording = Rgb.RED
-        StopClip = Rgb.RED
+        ClipStopped = Rgb.OFF
+        ClipTriggeredPlay = Rgb.OFF
+        ClipTriggeredRecord = Rgb.OFF
+        ClipPlaying = Rgb.OFF
+        ClipRecording = Rgb.OFF
+        StopClip = Rgb.OFF
         StopClipDisabled = Rgb.OFF
-        StopClipTriggered = Rgb.DIM_RED
+        StopClipTriggered = Rgb.OFF

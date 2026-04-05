@@ -146,6 +146,7 @@ class SchwungDeviceControl(ControlSurface):
         self._set_file_path_cache = None  # last known song file_path
 
         self._bindings_mtimes = {}  # {device_hash: mtime}
+        self._session_listeners = []  # [(obj, attr, callback), ...]
 
         # Snapshot: list of (param_ref, value) for set page recall
         self._snapshot = None
@@ -172,6 +173,7 @@ class SchwungDeviceControl(ControlSurface):
         self.log_message('SchwungDeviceControl: disconnect() called')
         self._remove_all_param_listeners()
         self._remove_device_listeners()
+        self._remove_session_listeners()
         super().disconnect()
 
     def _get_valid_device(self):
@@ -194,6 +196,7 @@ class SchwungDeviceControl(ControlSurface):
         note_modes = self.component_map['Note_Modes']
         try:
             if mode == PAD_MODE_NOTE:
+                self._remove_session_listeners()
                 self.set_can_auto_arm(True)
                 self.set_can_update_controlled_track(True)
                 if note_modes.selected_mode != 'keyboard':
@@ -204,8 +207,10 @@ class SchwungDeviceControl(ControlSurface):
                 self.set_can_update_controlled_track(False)
                 if note_modes.selected_mode != 'session':
                     note_modes.selected_mode = 'session'
+                self._install_session_listeners()
                 self._send_session_grid_colors()
             else:
+                self._remove_session_listeners()
                 if note_modes.selected_mode is not None:
                     note_modes.selected_mode = None
                 self.set_can_auto_arm(False)
@@ -279,6 +284,47 @@ class SchwungDeviceControl(ControlSurface):
             self._send_sysex(CMD_SESSION_GRID_COLORS, colors)
         except Exception as e:
             self.log_message('SchwungDeviceControl: session grid colors error: {}'.format(e))
+
+    def _install_session_listeners(self):
+        """Add listeners on clip slots in the 8x4 grid for real-time color updates."""
+        self._remove_session_listeners()
+        tracks = self.song.tracks
+        scenes = self.song.scenes
+        num_tracks = min(8, len(tracks))
+        num_scenes = min(4, len(scenes))
+        self.log_message('SchwungDeviceControl: installing session listeners: {}t x {}s'.format(num_tracks, num_scenes))
+        for col in range(num_tracks):
+            track = tracks[col]
+            self._add_session_listener(track, 'arm', self._on_session_grid_changed)
+            for row in range(num_scenes):
+                slot = track.clip_slots[row]
+                self._add_session_listener(slot, 'has_clip', self._on_session_grid_changed)
+                self._add_session_listener(slot, 'is_triggered', self._on_session_grid_changed)
+                if slot.has_clip:
+                    self._add_session_listener(slot.clip, 'playing_status', self._on_session_grid_changed)
+        self.log_message('SchwungDeviceControl: installed {} session listeners'.format(len(self._session_listeners)))
+
+    def _remove_session_listeners(self):
+        for obj, attr, cb in self._session_listeners:
+            try:
+                getattr(obj, 'remove_{}_listener'.format(attr))(cb)
+            except (RuntimeError, AttributeError):
+                pass
+        self._session_listeners = []
+
+    def _add_session_listener(self, obj, attr, callback):
+        try:
+            getattr(obj, 'add_{}_listener'.format(attr))(callback)
+            self._session_listeners.append((obj, attr, callback))
+        except (RuntimeError, AttributeError):
+            pass
+
+    def _on_session_grid_changed(self):
+        self.log_message('SchwungDeviceControl: session grid changed (pad_mode={}, connected={})'.format(self._pad_mode, self._connected))
+        if self._pad_mode == PAD_MODE_SESSION and self._connected:
+            self._send_session_grid_colors()
+            # Re-install listeners since clip objects may have changed
+            self._install_session_listeners()
 
     # =========================================================================
     # Listeners setup
