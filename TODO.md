@@ -3,3 +3,4 @@
 - > 1 Move connected
 - Wifi?
 - Session view (Claude: session-view-framework)
+- Set param min/max
