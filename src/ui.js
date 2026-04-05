@@ -89,6 +89,16 @@ const CMD_DEVICE_SELECT = 0x1d;        // vel = device_index + 1
 const CMD_FAV_ADD = 0x1e;              // vel = fav_index * 16 + knob_idx + 1
 const CMD_SET_ADD = 0x1f;              // vel = set_index * 16 + knob_idx + 1
 
+// Note mode commands
+const CMD_NOTE_MODE = 0x21;            // vel = 1+1 (on) or 0+1 (off)
+const CMD_OCTAVE = 0x22;               // vel = 1+1 (up) or 0+1 (down)
+const CMD_NOTE_LAYOUT_INFO = 0x11;     // SysEx: root_note, is_in_key, interval, scale_notes...
+
+// Pad note range (same as Move hardware)
+const PAD_NOTE_START = 68;
+const PAD_NOTE_END = 99;
+const PAD_CHANNEL = 0x00;  // channel 1 for pad MIDI (separate from command ch16)
+
 // Timing
 const HEARTBEAT_TIMEOUT_TICKS = 720; // ~3 seconds at ~240fps (tick rate is faster than expected)
 const RECONNECT_INTERVAL_TICKS = 480; // ~2 seconds between HELLO retries when disconnected
@@ -102,6 +112,13 @@ let connected = false;
 let heartbeatTimer = 0;
 let reconnectTimer = 0;
 let learnMode = false;
+let noteMode = false;
+
+// Note layout info (from Ableton, for pad coloring)
+let noteLayoutRoot = 0;
+let noteLayoutInKey = true;
+let noteLayoutInterval = 0;
+let noteLayoutScaleNotes = [0, 2, 4, 5, 7, 9, 11];  // default major
 let shiftHeld = false;
 let deleteHeld = false;
 let needsRedraw = true;
@@ -188,6 +205,7 @@ function resetUIState() {
   setSubCount = 0;
   setActiveSub = 0;
   learnMode = false;
+  noteMode = false;
   overlayKnob = -1;
   overlayValueStr = "";
   overlayTimer = 0;
@@ -259,6 +277,24 @@ function sendCC(cc, value) {
     0xb0 | MIDI_CHANNEL,
     cc,
     value,
+  ]);
+}
+
+function sendPadNoteOn(note, velocity) {
+  move_midi_external_send([
+    (CABLE << 4) | 0x09, // CIN for Note On
+    0x90 | PAD_CHANNEL,
+    note,
+    velocity,
+  ]);
+}
+
+function sendPadNoteOff(note) {
+  move_midi_external_send([
+    (CABLE << 4) | 0x08, // CIN for Note Off
+    0x80 | PAD_CHANNEL,
+    note,
+    0,
   ]);
 }
 
@@ -442,6 +478,23 @@ function handleSysEx(msg) {
         needsRedraw = true;
       }
       break;
+
+    case CMD_NOTE_LAYOUT_INFO:
+      // [root_note, is_in_key, interval, scale_note0, scale_note1, ...]
+      if (payload.length >= 3) {
+        noteLayoutRoot = payload[0];
+        noteLayoutInKey = payload[1] > 0;
+        noteLayoutInterval = payload[2];
+        noteLayoutScaleNotes = [];
+        for (let i = 3; i < payload.length; i++) {
+          noteLayoutScaleNotes.push(payload[i]);
+        }
+        if (noteMode) {
+          updatePadLEDs();
+        }
+        needsRedraw = true;
+      }
+      break;
   }
 }
 
@@ -597,7 +650,31 @@ function handleInternalCC(cc, value) {
     sendNote(CMD_NAV_DEVICE, 0x01 + 1); // right = +1
     return;
   }
-  // Up/Down arrows currently unused (banks removed, pages use step buttons)
+  // Up arrow — toggle note mode
+  if (cc === MoveUp && value > 63) {
+    if (shiftHeld && noteMode) {
+      // Shift+Up = octave up
+      sendNote(CMD_OCTAVE, 1 + 1);
+      return;
+    }
+    noteMode = !noteMode;
+    sendNote(CMD_NOTE_MODE, (noteMode ? 1 : 0) + 1);
+    if (noteMode) {
+      updatePadLEDs();
+    } else {
+      clearPadLEDs();
+    }
+    needsRedraw = true;
+    return;
+  }
+
+  // Down arrow — octave down (in note mode with shift), otherwise unused
+  if (cc === MoveDown && value > 63) {
+    if (shiftHeld && noteMode) {
+      sendNote(CMD_OCTAVE, 0 + 1); // down
+      return;
+    }
+  }
 
   // Main wheel — sequential page/subpage navigation
   if (cc === MoveMainKnob) {
@@ -665,6 +742,13 @@ function handleKnobTurn(idx, rawValue) {
 }
 
 function handleInternalNoteOn(note, velocity) {
+  // Pad press in note mode — forward to Ableton via PlayableComponent
+  if (noteMode && note >= PAD_NOTE_START && note <= PAD_NOTE_END) {
+    sendPadNoteOn(note, velocity);
+    setLED(note, White);
+    return;
+  }
+
   // Capacitive knob touch (notes 0-7)
   if (note < 8) {
     // Remove if already in stack (re-touch), then push to top
@@ -754,6 +838,13 @@ function handleInternalNoteOn(note, velocity) {
 }
 
 function handleInternalNoteOff(note) {
+  // Pad release in note mode
+  if (noteMode && note >= PAD_NOTE_START && note <= PAD_NOTE_END) {
+    sendPadNoteOff(note);
+    updateSinglePadLED(note);
+    return;
+  }
+
   if (note < 8) {
     const si = touchStack.indexOf(note);
     if (si >= 0) {
@@ -823,6 +914,13 @@ function drawScreen() {
 
   drawParams();
   drawFooter();
+
+  // Note mode indicator (top-right corner)
+  if (noteMode) {
+    const label = "NOTE";
+    const lw = text_width(label);
+    print(SCREEN_WIDTH - lw - 1, 0, label, 1);
+  }
 
   if (favFeedbackTimer > 0) {
     drawFavFeedback();
@@ -1190,6 +1288,49 @@ function drawValueOverlay() {
  * Overtake modules get exclusive LED control — use cached setLED/setButtonLED
  * from input_filter.mjs. Progressive init prevents MIDI buffer overflow.
  * ============================================================================ */
+
+// Pad LED colors for note mode — root=bright, in-scale=dim, out=off
+const PAD_COLOR_ROOT = BrightGreen;
+const PAD_COLOR_SCALE = DarkGrey;
+const PAD_COLOR_OFF = Black;
+
+function getPadNoteColor(padNote) {
+  // Map pad grid position to scale note to determine color
+  // Simplified: we use the layout info from Ableton to color pads
+  const padIdx = padNote - PAD_NOTE_START;
+  const col = padIdx % 8;
+  const row = Math.floor(padIdx / 8);
+  // Approximate note calculation matching MelodicPattern logic
+  const interval = noteLayoutInterval || noteLayoutScaleNotes.length;
+  const scaleLen = noteLayoutScaleNotes.length;
+  const index = col + interval * row;
+  const octave = Math.floor(index / scaleLen);
+  const scaleIdx = ((index % scaleLen) + scaleLen) % scaleLen;
+  const semitone = noteLayoutScaleNotes[scaleIdx] % 12;
+  const rootSemitone = noteLayoutRoot % 12;
+  if (semitone === rootSemitone) return PAD_COLOR_ROOT;
+  // Check if this note is in the base scale (relative to root)
+  const relNote = (semitone - rootSemitone + 12) % 12;
+  const baseScale = noteLayoutScaleNotes.map(n => (n - noteLayoutRoot + 12) % 12);
+  if (baseScale.includes(relNote)) return PAD_COLOR_SCALE;
+  return PAD_COLOR_OFF;
+}
+
+function updatePadLEDs() {
+  for (let i = PAD_NOTE_START; i <= PAD_NOTE_END; i++) {
+    setLED(i, getPadNoteColor(i));
+  }
+}
+
+function updateSinglePadLED(note) {
+  setLED(note, getPadNoteColor(note));
+}
+
+function clearPadLEDs() {
+  for (let i = PAD_NOTE_START; i <= PAD_NOTE_END; i++) {
+    setLED(i, Black);
+  }
+}
 
 function buildLedList() {
   const leds = [];

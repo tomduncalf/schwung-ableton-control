@@ -14,7 +14,9 @@ import sys
 from time import sleep
 
 import Live
-from _Framework.ControlSurface import ControlSurface
+from ableton.v3.base import const
+from ableton.v3.control_surface import ControlSurface
+from .keyboard import NoteLayout
 
 # MIDI protocol constants
 MIDI_CHANNEL = 15  # channel 16 (0-indexed)
@@ -58,6 +60,13 @@ CMD_DEVICE_SELECT = 0x1D
 CMD_FAV_ADD = 0x1E          # vel = fav_index * 16 + knob_idx + 1
 CMD_SET_ADD = 0x1F          # vel = set_index * 16 + knob_idx + 1
 
+# Note mode commands
+CMD_NOTE_MODE = 0x21        # Move -> Live: vel = 1+1 (on) or 0+1 (off)
+CMD_OCTAVE = 0x22           # Move -> Live: vel = 1+1 (up) or 0+1 (down)
+
+# SysEx commands: Live -> Move (note layout info for pad coloring)
+CMD_NOTE_LAYOUT_INFO = 0x11  # root_note, is_in_key, interval, scale_notes...
+
 # Persistence
 if sys.platform == 'darwin':
     _CONFIG_DIR = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support', 'SchwungDeviceControl')
@@ -76,11 +85,11 @@ MAX_PARAM_NAME_LEN = 12
 
 class SchwungDeviceControl(ControlSurface):
 
-    def __init__(self, c_instance):
-        ControlSurface.__init__(self, c_instance)
-        with self.component_guard():
-            self.log_message('SchwungDeviceControl: initializing')
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.log_message('SchwungDeviceControl: initializing (v3)')
 
+        self._note_mode = False
         self._learn_mode = False
         self._device_list = []
         self._device_index = 0
@@ -112,11 +121,62 @@ class SchwungDeviceControl(ControlSurface):
         self._setup_listeners()
         self._schedule_heartbeat()
 
+    def _get_additional_dependencies(self):
+        note_layout = self.register_disconnectable(
+            NoteLayout(preferences=self.preferences)
+        )
+        return {'note_layout': const(note_layout)}
+
     def disconnect(self):
         self.log_message('SchwungDeviceControl: disconnect() called')
         self._remove_all_param_listeners()
         self._remove_device_listeners()
-        ControlSurface.disconnect(self)
+        super().disconnect()
+
+    # =========================================================================
+    # Note mode
+    # =========================================================================
+
+    def _set_note_mode(self, enabled):
+        self._note_mode = enabled
+        self.log_message('SchwungDeviceControl: note mode {}'.format('ON' if enabled else 'OFF'))
+        try:
+            if enabled:
+                self.set_can_auto_arm(True)
+                self.set_can_update_controlled_track(True)
+                self.component_map['Note_Modes'].selected_mode = 'keyboard'
+                self._send_note_layout_info()
+            else:
+                self.component_map['Note_Modes'].selected_mode = None
+                self.set_can_auto_arm(False)
+                self.set_can_update_controlled_track(False)
+        except Exception as e:
+            self.log_message('SchwungDeviceControl: note mode error: {}'.format(e))
+
+    def _handle_octave(self, direction):
+        try:
+            instrument = self.component_map['Instrument']
+            if direction > 0:
+                instrument.scroll_page_up()
+            else:
+                instrument.scroll_page_down()
+            self._send_note_layout_info()
+        except Exception as e:
+            self.log_message('SchwungDeviceControl: octave error: {}'.format(e))
+
+    def _send_note_layout_info(self):
+        """Send scale/root info to Move for pad coloring."""
+        try:
+            instrument = self.component_map['Instrument']
+            layout = instrument.note_layout
+            root = layout.root_note
+            is_in_key = 1 if layout.is_in_key else 0
+            interval = layout.interval if layout.interval is not None else 0
+            scale_notes = layout.scale.notes if layout.scale else list(range(12))
+            data = [root, is_in_key, interval] + [n & 0x7F for n in scale_notes]
+            self._send_sysex(CMD_NOTE_LAYOUT_INFO, data)
+        except Exception as e:
+            self.log_message('SchwungDeviceControl: send note layout error: {}'.format(e))
 
     # =========================================================================
     # Listeners setup
@@ -210,13 +270,15 @@ class SchwungDeviceControl(ControlSurface):
     # =========================================================================
 
     def build_midi_map(self, midi_map_handle):
+        # Let v3 framework install element mappings (pad matrix for PlayableComponent)
+        super().build_midi_map(midi_map_handle)
         self.log_message('SchwungDeviceControl: build_midi_map() called')
         # Forward all note commands from Move (ch16)
         for note in [CMD_HELLO, CMD_LEARN_START, CMD_LEARN_STOP, CMD_LEARN_KNOB,
                       CMD_REQUEST_STATE, CMD_UNMAP_KNOB, CMD_NAV_DEVICE,
                       CMD_PAGE_CHANGE, CMD_REQUEST_VALUE_STRING, CMD_PAGE_SEQUENTIAL,
                       CMD_RESET_PARAM, CMD_DEVICE_LIST_REQUEST, CMD_DEVICE_SELECT,
-                      CMD_FAV_ADD, CMD_SET_ADD]:
+                      CMD_FAV_ADD, CMD_SET_ADD, CMD_NOTE_MODE, CMD_OCTAVE]:
             Live.MidiMap.forward_midi_note(self._c_instance.handle(), midi_map_handle, MIDI_CHANNEL, note)
         # Forward knob value CCs 0-7 (ch16)
         for cc in KNOB_VALUE_CCS:
@@ -306,6 +368,10 @@ class SchwungDeviceControl(ControlSurface):
             set_index = v >> 4
             knob_idx = v & 0x0F
             self._handle_set_add(set_index, knob_idx)
+        elif note == CMD_NOTE_MODE:
+            self._set_note_mode(v > 0)
+        elif note == CMD_OCTAVE:
+            self._handle_octave(v)
 
     def _process_sysex(self, midi_bytes):
         self.log_message('SchwungDeviceControl SYSEX len={}: {}'.format(
