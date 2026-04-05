@@ -252,14 +252,18 @@ class SchwungDeviceControl(ControlSurface):
                 self._device_index = self._device_list.index(device)
             except ValueError:
                 self._device_index = 0
-            # Restore remembered page/slot or default to 0
+            # If on a set page (slot 9), stay on it across device changes
             device_hash = self._get_device_hash(device)
-            remembered = self._device_page_memory.get(device_hash)
-            if remembered is not None:
-                self._current_page, self._current_slot = remembered
+            if self._current_slot == 9:
+                pass  # keep current set page/slot
             else:
-                self._current_page = 0
-                self._current_slot = 0
+                # Restore remembered page/slot or default to 0
+                remembered = self._device_page_memory.get(device_hash)
+                if remembered is not None:
+                    self._current_page, self._current_slot = remembered
+                else:
+                    self._current_page = 0
+                    self._current_slot = 0
             self._apply_bindings_for_device(device)
         else:
             self._device_list = []
