@@ -1,6 +1,6 @@
-- Note entry
-- Track select
+- Help
+- Scroll tracks/devices
 - Snapshot/morph?
 - > 1 Move connected
 - Wifi?
-- Help
+- Session view (Claude: session-view-framework)
