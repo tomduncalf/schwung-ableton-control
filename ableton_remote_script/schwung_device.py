@@ -17,6 +17,7 @@ from time import sleep
 import Live
 from ableton.v3.base import const
 from ableton.v3.control_surface import ControlSurface
+from ableton.v3.live import liveobj_valid
 
 logger = logging.getLogger(__name__)
 from .keyboard import NoteLayout
@@ -151,6 +152,15 @@ class SchwungDeviceControl(ControlSurface):
         self._remove_device_listeners()
         super().disconnect()
 
+    def _get_valid_device(self):
+        """Return _selected_device if still valid, else clear and return None."""
+        device = self._selected_device
+        if device is not None and not liveobj_valid(device):
+            self.log_message('SchwungDeviceControl: stale device ref, clearing')
+            self._selected_device = None
+            return None
+        return device
+
     # =========================================================================
     # Note mode
     # =========================================================================
@@ -228,7 +238,7 @@ class SchwungDeviceControl(ControlSurface):
 
     def _on_device_changed(self):
         # Save current page/slot for the device we're leaving
-        if self._selected_device is not None:
+        if self._selected_device is not None and liveobj_valid(self._selected_device):
             prev_hash = self._get_device_hash(self._selected_device)
             self._device_page_memory[prev_hash] = (self._current_page, self._current_slot)
 
@@ -546,7 +556,7 @@ class SchwungDeviceControl(ControlSurface):
             target_sub = 1 if slot_idx == 11 else 0
             self._handle_set_page_change(target_sub)
             return
-        device = self._selected_device
+        device = self._get_valid_device()
         if device is None:
             return
         device_hash = self._get_device_hash(device)
@@ -610,7 +620,7 @@ class SchwungDeviceControl(ControlSurface):
 
     def _handle_page_sequential(self, direction):
         """Walk through all pages in slot order: slot 0 sub 0, slot 0 sub 1, slot 1 sub 0, etc."""
-        device = self._selected_device
+        device = self._get_valid_device()
         if device is None:
             return
         device_hash = self._get_device_hash(device)
@@ -692,7 +702,7 @@ class SchwungDeviceControl(ControlSurface):
         """Copy binding from current page's knob to a favourite page (both on slot 8)."""
         if fav_index < 0 or fav_index > 1 or knob_idx < 0 or knob_idx >= 8:
             return
-        device = self._selected_device
+        device = self._get_valid_device()
         if device is None:
             return
         device_hash = self._get_device_hash(device)
@@ -754,7 +764,7 @@ class SchwungDeviceControl(ControlSurface):
 
     def _handle_set_page_change(self, target_sub):
         """Switch to a set page subpage."""
-        device = self._selected_device
+        device = self._get_valid_device()
         set_pages = self._set_bindings.get('pages', [])
         # Save current slot memory
         if device:
@@ -774,7 +784,7 @@ class SchwungDeviceControl(ControlSurface):
         """Copy binding from current page's knob to a set page, including device reference."""
         if set_index < 0 or set_index > 1 or knob_idx < 0 or knob_idx >= 8:
             return
-        device = self._selected_device
+        device = self._get_valid_device()
         if device is None:
             return
         device_hash = self._get_device_hash(device)
@@ -1176,7 +1186,7 @@ class SchwungDeviceControl(ControlSurface):
                 set_pages[self._current_page].get('knobs', [None] * 8)[knob_idx] = None
                 self._save_set_bindings()
         else:
-            device = self._selected_device
+            device = self._get_valid_device()
             if device:
                 device_hash = self._get_device_hash(device)
                 device_entry = self._bindings.get(device_hash, {})
@@ -1191,7 +1201,7 @@ class SchwungDeviceControl(ControlSurface):
 
     def _cleanup_provisional_page(self):
         """Remove current page if it has no knob bindings (provisional from learn mode)."""
-        device = self._selected_device
+        device = self._get_valid_device()
         if device is None:
             return
         device_hash = self._get_device_hash(device)
@@ -1362,7 +1372,7 @@ class SchwungDeviceControl(ControlSurface):
             binding_or_list = pages[self._current_page].get('knobs', [None] * 8)[knob_idx]
             if binding_or_list:
                 if isinstance(binding_or_list, list):
-                    device = self._selected_device
+                    device = self._get_valid_device()
                     if device:
                         binding, _ = self._resolve_conditional_binding(device, binding_or_list)
                         if binding:
@@ -1445,7 +1455,7 @@ class SchwungDeviceControl(ControlSurface):
     # =========================================================================
 
     def _send_full_state(self):
-        device = self._selected_device
+        device = self._get_valid_device()
         self.log_message('SchwungDeviceControl: _send_full_state device={} page={} slot={} params={}'.format(
             device.name if device else 'None', self._current_page, self._current_slot,
             [p.name if p else '-' for p in self._active_params]))
@@ -1665,8 +1675,8 @@ class SchwungDeviceControl(ControlSurface):
                 self.log_message('SchwungDeviceControl: cleared deleted bindings for {}'.format(device_hash))
                 changed = True
         if changed:
-            device = self._selected_device
-            if device:
+            device = self._get_valid_device()
+            if device and liveobj_valid(device):
                 self._apply_bindings_for_device(device)
                 if self._connected:
                     self._send_full_state()

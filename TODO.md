@@ -1,4 +1,3 @@
-- Help
 - Scroll tracks/devices
 - Snapshot/morph?
 - > 1 Move connected
