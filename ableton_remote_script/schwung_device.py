@@ -13,62 +13,52 @@ import os
 import sys
 from time import sleep
 
+import Live
 from _Framework.ControlSurface import ControlSurface
 
 # MIDI protocol constants
 MIDI_CHANNEL = 15  # channel 16 (0-indexed)
-KNOB_CCS = [71, 72, 73, 74, 75, 76, 77, 78]
-CC_DEVICE_LEFT = 80
-CC_DEVICE_RIGHT = 81
-CC_LEARN_TOGGLE = 84
-NAV_CCS = {CC_DEVICE_LEFT, CC_DEVICE_RIGHT, CC_LEARN_TOGGLE}
+KNOB_VALUE_CCS = [0, 1, 2, 3, 4, 5, 6, 7]  # bidirectional knob values
 
-# SysEx protocol
+# SysEx protocol (for variable-length string/bulk data only)
 SYSEX_START = 0xF0
 SYSEX_END = 0xF7
 SYSEX_HEADER = (SYSEX_START, 0x00, 0x7D, 0x01)
 
-# SysEx commands: Live -> Move
+# SysEx commands: Live -> Move (string/bulk data)
 CMD_DEVICE_INFO = 0x01
 CMD_PARAM_INFO = 0x02
-CMD_DEVICE_COUNT = 0x03
-CMD_DEVICE_INDEX = 0x04
-# 0x05 was CMD_BANK_INFO (removed)
 CMD_LEARN_ACK = 0x06
-CMD_HEARTBEAT = 0x07
-CMD_ALL_VALUES = 0x08
 CMD_PAGE_INFO = 0x09
 CMD_PAGE_NAME = 0x0A
-CMD_PARAM_VALUE_STRING = 0x0B  # Live -> Move: knob_idx, value string (e.g. "3.5 kHz")
-CMD_PARAM_STEPS = 0x0C         # Live -> Move: 8 step counts (0=continuous, N=discrete steps)
-CMD_SLOT_SUBPAGE_INFO = 0x0D   # Live -> Move: per-slot [subpage_count, active_subpage] (offset +1)
+CMD_PARAM_VALUE_STRING = 0x0B
+CMD_PARAM_STEPS = 0x0C
+CMD_SLOT_SUBPAGE_INFO = 0x0D
+CMD_DEVICE_LIST_RESPONSE = 0x0E
 
-# SysEx commands: Move -> Live
+# Note commands: Live -> Move (note=cmd, velocity=value)
+CMD_DEVICE_COUNT = 0x03
+CMD_DEVICE_INDEX = 0x04
+CMD_HEARTBEAT = 0x07
+CMD_FAV_ADD_ACK = 0x0F     # vel = fav_index * 16 + result + 1
+CMD_SET_ADD_ACK = 0x20      # vel = set_index * 16 + result + 1
+
+# Note commands: Move -> Live (note=cmd, velocity=value, all +1 offset)
 CMD_HELLO = 0x10
 CMD_LEARN_START = 0x11
 CMD_LEARN_STOP = 0x12
 CMD_LEARN_KNOB = 0x13
-CMD_KNOB_VALUE = 0x14   # Move -> Live: knob_idx, value (0-127)
 CMD_REQUEST_STATE = 0x15
 CMD_UNMAP_KNOB = 0x16
-CMD_NAV_DEVICE = 0x17   # Move -> Live: 0x00=left, 0x01=right
-CMD_PAGE_CHANGE = 0x18  # Move -> Live: pageIndex
-CMD_REQUEST_VALUE_STRING = 0x19  # Move -> Live: knob_idx
-CMD_PAGE_SEQUENTIAL = 0x1A      # Move -> Live: 0x00=prev, 0x01=next (walks pages in slot order)
-CMD_RESET_PARAM = 0x1B          # Move -> Live: knob_idx (reset to default value)
-CMD_DEVICE_LIST_REQUEST = 0x1C  # Move -> Live: offset (request 8 device names)
-CMD_DEVICE_SELECT = 0x1D        # Move -> Live: device_index (select by flat index)
-
-# SysEx commands: Live -> Move (device browser)
-CMD_DEVICE_LIST_RESPONSE = 0x0E  # Live -> Move: offset, total, name1\0, name2\0, ...
-CMD_FAV_ADD_ACK = 0x0F           # Live -> Move: fav_index, result (0=ok, 1=full, 2=no binding)
-
-# SysEx commands: Move -> Live (favourites)
-CMD_FAV_ADD = 0x1E               # Move -> Live: fav_index (0/1), knob_idx
-
-# SysEx commands: set pages (cross-device per-set favourites)
-CMD_SET_ADD = 0x1F               # Move -> Live: set_index (0/1), knob_idx
-CMD_SET_ADD_ACK = 0x20           # Live -> Move: set_index, result (0=ok, 1=full, 2=no binding)
+CMD_NAV_DEVICE = 0x17
+CMD_PAGE_CHANGE = 0x18
+CMD_REQUEST_VALUE_STRING = 0x19
+CMD_PAGE_SEQUENTIAL = 0x1A
+CMD_RESET_PARAM = 0x1B
+CMD_DEVICE_LIST_REQUEST = 0x1C
+CMD_DEVICE_SELECT = 0x1D
+CMD_FAV_ADD = 0x1E          # vel = fav_index * 16 + knob_idx + 1
+CMD_SET_ADD = 0x1F          # vel = set_index * 16 + knob_idx + 1
 
 # Persistence
 if sys.platform == 'darwin':
@@ -214,6 +204,22 @@ class SchwungDeviceControl(ControlSurface):
         return None
 
     # =========================================================================
+    # MIDI map — register notes/CCs so the C++ layer forwards them to Python
+    # =========================================================================
+
+    def build_midi_map(self, midi_map_handle):
+        # Forward all note commands from Move (ch16)
+        for note in [CMD_HELLO, CMD_LEARN_START, CMD_LEARN_STOP, CMD_LEARN_KNOB,
+                      CMD_REQUEST_STATE, CMD_UNMAP_KNOB, CMD_NAV_DEVICE,
+                      CMD_PAGE_CHANGE, CMD_REQUEST_VALUE_STRING, CMD_PAGE_SEQUENTIAL,
+                      CMD_RESET_PARAM, CMD_DEVICE_LIST_REQUEST, CMD_DEVICE_SELECT,
+                      CMD_FAV_ADD, CMD_SET_ADD]:
+            Live.MidiMap.forward_midi_note(self._c_instance.handle(), midi_map_handle, MIDI_CHANNEL, note)
+        # Forward knob value CCs 0-7 (ch16)
+        for cc in KNOB_VALUE_CCS:
+            Live.MidiMap.forward_midi_cc(self._c_instance.handle(), midi_map_handle, MIDI_CHANNEL, cc)
+
+    # =========================================================================
     # MIDI receive
     # =========================================================================
 
@@ -229,22 +235,69 @@ class SchwungDeviceControl(ControlSurface):
             self._process_sysex(midi_bytes)
             return
 
-        # CC on our channel
         if len(midi_bytes) >= 3:
             status = midi_bytes[0] & 0xF0
             channel = midi_bytes[0] & 0x0F
-            if status == 0xB0 and channel == MIDI_CHANNEL:
-                cc = midi_bytes[1]
-                value = midi_bytes[2]
-                if cc in KNOB_CCS:
-                    self._handle_knob_cc(cc, value)
+            if channel == MIDI_CHANNEL:
+                # Note On — command dispatch
+                if status == 0x90:
+                    self._process_note_command(midi_bytes[1], midi_bytes[2])
                     return
-                if cc in NAV_CCS:
-                    self._handle_nav_cc(cc, value)
-                    return
+                # CC — knob values (CC 0-7)
+                if status == 0xB0:
+                    cc = midi_bytes[1]
+                    value = midi_bytes[2]
+                    if cc in KNOB_VALUE_CCS:
+                        self._handle_knob_value(cc, value)
+                        return
 
         # Pass through everything else
         super(SchwungDeviceControl, self).receive_midi(midi_bytes)
+
+    def _process_note_command(self, note, vel):
+        """Dispatch Note On messages as commands (note=cmd, vel=value with +1 offset)."""
+        self.log_message('SchwungDeviceControl NOTE cmd=0x{:02X} vel={}'.format(note, vel))
+        v = vel - 1  # undo +1 offset
+
+        if note == CMD_HELLO:
+            self._on_hello()
+        elif note == CMD_LEARN_START:
+            self._learn_mode = True
+            self.log_message('SchwungDeviceControl: learn mode ON')
+        elif note == CMD_LEARN_STOP:
+            self._learn_mode = False
+            self._cleanup_provisional_page()
+            self.log_message('SchwungDeviceControl: learn mode OFF')
+        elif note == CMD_LEARN_KNOB:
+            self._learn_knob(v)
+        elif note == CMD_REQUEST_STATE:
+            self._send_full_state()
+        elif note == CMD_UNMAP_KNOB:
+            self._unmap_knob(v)
+        elif note == CMD_NAV_DEVICE:
+            direction = 1 if v == 0x01 else -1
+            self._navigate_device(direction)
+        elif note == CMD_PAGE_CHANGE:
+            self._handle_page_change(v)
+        elif note == CMD_PAGE_SEQUENTIAL:
+            direction = 1 if v == 0x01 else -1
+            self._handle_page_sequential(direction)
+        elif note == CMD_REQUEST_VALUE_STRING:
+            self._send_param_value_string(v)
+        elif note == CMD_RESET_PARAM:
+            self._reset_param_to_default(v)
+        elif note == CMD_DEVICE_LIST_REQUEST:
+            self._send_device_list(v)
+        elif note == CMD_DEVICE_SELECT:
+            self._select_device_by_index(v)
+        elif note == CMD_FAV_ADD:
+            fav_index = v >> 4
+            knob_idx = v & 0x0F
+            self._handle_fav_add(fav_index, knob_idx)
+        elif note == CMD_SET_ADD:
+            set_index = v >> 4
+            knob_idx = v & 0x0F
+            self._handle_set_add(set_index, knob_idx)
 
     def _process_sysex(self, midi_bytes):
         self.log_message('SchwungDeviceControl SYSEX len={}: {}'.format(
@@ -259,56 +312,6 @@ class SchwungDeviceControl(ControlSurface):
         cmd = midi_bytes[4]
         data = midi_bytes[5:-1]  # strip F7
         self.log_message('SchwungDeviceControl SYSEX cmd=0x{:02X} data={}'.format(cmd, list(data)))
-
-        if cmd == CMD_HELLO:
-            self._on_hello()
-        elif cmd == CMD_LEARN_START:
-            self._learn_mode = True
-            self.log_message('SchwungDeviceControl: learn mode ON')
-        elif cmd == CMD_LEARN_STOP:
-            self._learn_mode = False
-            self._cleanup_provisional_page()
-            self.log_message('SchwungDeviceControl: learn mode OFF')
-        elif cmd == CMD_LEARN_KNOB:
-            if len(data) >= 1:
-                self._learn_knob(data[0])
-        elif cmd == CMD_KNOB_VALUE:
-            if len(data) >= 2:
-                self._handle_knob_value(data[0], data[1])
-        elif cmd == CMD_REQUEST_STATE:
-            self._send_full_state()
-        elif cmd == CMD_UNMAP_KNOB:
-            if len(data) >= 1:
-                self._unmap_knob(data[0])
-        elif cmd == CMD_NAV_DEVICE:
-            if len(data) >= 1:
-                direction = 1 if data[0] == 0x01 else -1
-                self._navigate_device(direction)
-        elif cmd == CMD_PAGE_CHANGE:
-            if len(data) >= 1:
-                self._handle_page_change(data[0])
-        elif cmd == CMD_PAGE_SEQUENTIAL:
-            if len(data) >= 1:
-                direction = 1 if data[0] == 0x01 else -1
-                self._handle_page_sequential(direction)
-        elif cmd == CMD_REQUEST_VALUE_STRING:
-            if len(data) >= 1:
-                self._send_param_value_string(data[0])
-        elif cmd == CMD_RESET_PARAM:
-            if len(data) >= 1:
-                self._reset_param_to_default(data[0])
-        elif cmd == CMD_DEVICE_LIST_REQUEST:
-            offset = data[0] if len(data) >= 1 else 0
-            self._send_device_list(offset)
-        elif cmd == CMD_DEVICE_SELECT:
-            if len(data) >= 1:
-                self._select_device_by_index(data[0])
-        elif cmd == CMD_FAV_ADD:
-            if len(data) >= 2:
-                self._handle_fav_add(data[0], data[1])
-        elif cmd == CMD_SET_ADD:
-            if len(data) >= 2:
-                self._handle_set_add(data[0], data[1])
 
     # =========================================================================
     # Knob value handling (Move -> Live parameter changes)
@@ -355,25 +358,6 @@ class SchwungDeviceControl(ControlSurface):
         self._send_param_value(knob_idx)
         self._send_param_value_string(knob_idx)
         self.log_message('SchwungDeviceControl: reset knob {} to default'.format(knob_idx))
-
-    # =========================================================================
-    # Navigation CC handling
-    # =========================================================================
-
-    def _handle_nav_cc(self, cc, value):
-        if value == 0:
-            return  # only act on press
-
-        if cc == CC_DEVICE_LEFT:
-            self._navigate_device(-1)
-        elif cc == CC_DEVICE_RIGHT:
-            self._navigate_device(1)
-        elif cc == CC_LEARN_TOGGLE:
-            self._learn_mode = not self._learn_mode
-            if not self._learn_mode:
-                self._cleanup_provisional_page()
-            self.log_message('SchwungDeviceControl: learn mode {}'.format(
-                'ON' if self._learn_mode else 'OFF'))
 
     def _navigate_device(self, direction):
         if not self._device_list:
@@ -584,12 +568,12 @@ class SchwungDeviceControl(ControlSurface):
 
         # Get source binding from current page
         if self._current_page < 0 or self._current_page >= len(pages):
-            self._send_sysex(CMD_FAV_ADD_ACK, [fav_index, 2])  # no binding
+            self._send_note(CMD_FAV_ADD_ACK, fav_index * 16 + 2 + 1)  # no binding
             return
         source_knobs = pages[self._current_page].get('knobs', [None] * 8)
         source_binding = source_knobs[knob_idx]
         if source_binding is None:
-            self._send_sysex(CMD_FAV_ADD_ACK, [fav_index, 2])  # no binding
+            self._send_note(CMD_FAV_ADD_ACK, fav_index * 16 + 2 + 1)  # no binding
             return
 
         # Find or create the target fav subpage (both on slot 8)
@@ -616,14 +600,14 @@ class SchwungDeviceControl(ControlSurface):
                 free_slot = i
                 break
         if free_slot is None:
-            self._send_sysex(CMD_FAV_ADD_ACK, [fav_index, 1])  # full
+            self._send_note(CMD_FAV_ADD_ACK, fav_index * 16 + 1 + 1)  # full
             return
 
         # Copy binding
         fav_knobs[free_slot] = copy.deepcopy(source_binding)
         self._save_bindings()
 
-        self._send_sysex(CMD_FAV_ADD_ACK, [fav_index, 0])  # success
+        self._send_note(CMD_FAV_ADD_ACK, fav_index * 16 + 0 + 1)  # success
         self.log_message('SchwungDeviceControl: fav add slot={} knob={} -> fav {} knob {}'.format(
             self._current_slot, knob_idx, fav_index, free_slot))
 
@@ -669,24 +653,24 @@ class SchwungDeviceControl(ControlSurface):
             # On set page: source from set bindings
             set_pages = self._set_bindings.get('pages', [])
             if self._current_page < 0 or self._current_page >= len(set_pages):
-                self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
+                self._send_note(CMD_SET_ADD_ACK, set_index * 16 + 2 + 1)
                 return
             source_knobs = set_pages[self._current_page].get('knobs', [None] * 8)
             source_binding = source_knobs[knob_idx]
             if source_binding is None:
-                self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
+                self._send_note(CMD_SET_ADD_ACK, set_index * 16 + 2 + 1)
                 return
             # Already has device_hash
             new_binding = copy.deepcopy(source_binding)
         else:
             # On device/fav page: source from device bindings
             if self._current_page < 0 or self._current_page >= len(pages):
-                self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
+                self._send_note(CMD_SET_ADD_ACK, set_index * 16 + 2 + 1)
                 return
             source_knobs = pages[self._current_page].get('knobs', [None] * 8)
             source_binding = source_knobs[knob_idx]
             if source_binding is None:
-                self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
+                self._send_note(CMD_SET_ADD_ACK, set_index * 16 + 2 + 1)
                 return
             # Add device reference
             binding_copy = copy.deepcopy(source_binding)
@@ -694,7 +678,7 @@ class SchwungDeviceControl(ControlSurface):
                 # Conditional binding — take first entry for set page (simplify)
                 binding_copy = binding_copy[0] if binding_copy else None
                 if binding_copy is None:
-                    self._send_sysex(CMD_SET_ADD_ACK, [set_index, 2])
+                    self._send_note(CMD_SET_ADD_ACK, set_index * 16 + 2 + 1)
                     return
             new_binding = binding_copy
             new_binding['device_hash'] = device_hash
@@ -716,13 +700,13 @@ class SchwungDeviceControl(ControlSurface):
                 free_slot = i
                 break
         if free_slot is None:
-            self._send_sysex(CMD_SET_ADD_ACK, [set_index, 1])  # full
+            self._send_note(CMD_SET_ADD_ACK, set_index * 16 + 1 + 1)  # full
             return
 
         knobs[free_slot] = new_binding
         self._save_set_bindings()
 
-        self._send_sysex(CMD_SET_ADD_ACK, [set_index, 0])  # success
+        self._send_note(CMD_SET_ADD_ACK, set_index * 16 + 0 + 1)  # success
         self.log_message('SchwungDeviceControl: set add knob={} -> set {} knob {}'.format(
             knob_idx, set_index, free_slot))
 
@@ -1144,7 +1128,7 @@ class SchwungDeviceControl(ControlSurface):
     def _send_param_value(self, knob_idx):
         param = self._active_params[knob_idx]
         if param is None:
-            self._send_sysex(CMD_KNOB_VALUE, [knob_idx, 0])
+            self._send_cc(knob_idx, 0)
             return
         val_range = param.max - param.min
         if val_range == 0:
@@ -1152,7 +1136,7 @@ class SchwungDeviceControl(ControlSurface):
         else:
             midi_val = int(127 * (param.value - param.min) / val_range)
         midi_val = max(0, min(127, midi_val))
-        self._send_sysex(CMD_KNOB_VALUE, [knob_idx, midi_val])
+        self._send_cc(knob_idx, midi_val)
 
     def _get_param_num_steps(self, param):
         """Return number of discrete steps (0 = continuous)."""
@@ -1320,9 +1304,9 @@ class SchwungDeviceControl(ControlSurface):
         sleep(SYSEX_DELAY)
 
         # Device count and index
-        self._send_sysex(CMD_DEVICE_COUNT, [min(127, len(self._device_list))])
+        self._send_note(CMD_DEVICE_COUNT, min(127, len(self._device_list)))
         sleep(SYSEX_DELAY)
-        self._send_sysex(CMD_DEVICE_INDEX, [min(127, self._device_index)])
+        self._send_note(CMD_DEVICE_INDEX, min(127, self._device_index))
         sleep(SYSEX_DELAY)
 
         # Page info (slot-based)
@@ -1414,7 +1398,8 @@ class SchwungDeviceControl(ControlSurface):
                 else:
                     v = int(127 * (param.value - param.min) / val_range)
                     values.append(max(0, min(127, v)))
-        self._send_sysex(CMD_ALL_VALUES, values)
+        for i, v in enumerate(values):
+            self._send_cc(i, v)
         sleep(SYSEX_DELAY)
 
         # Step counts for discrete/quantized parameters
@@ -1456,7 +1441,7 @@ class SchwungDeviceControl(ControlSurface):
     def _on_hello(self):
         self.log_message('SchwungDeviceControl: HELLO received from Move module')
         self._connected = True
-        self._send_sysex(CMD_HEARTBEAT, [])
+        self._send_note(CMD_HEARTBEAT)
         # Trigger device detection and full state push
         self._on_device_changed()
 
@@ -1465,7 +1450,7 @@ class SchwungDeviceControl(ControlSurface):
 
     def _heartbeat_tick(self):
         if self._connected:
-            self._send_sysex(CMD_HEARTBEAT, [])
+            self._send_note(CMD_HEARTBEAT)
         self._check_bindings_file()
         self._check_set_bindings_file()
         if self._check_set_file_changed() and self._connected:
@@ -1517,6 +1502,9 @@ class SchwungDeviceControl(ControlSurface):
     # =========================================================================
     # MIDI send helpers
     # =========================================================================
+
+    def _send_note(self, note, velocity=1):
+        self._send_midi((0x90 | MIDI_CHANNEL, note, velocity))
 
     def _send_cc(self, cc, value):
         self._send_midi((0xB0 | MIDI_CHANNEL, cc, value))

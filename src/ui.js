@@ -47,52 +47,46 @@ const SCREEN_HEIGHT = 64;
 const CABLE = 2;
 const MIDI_CHANNEL = 0x0f; // channel 16
 
-// Knob CCs (same as Move hardware knobs)
+// Knob CCs (same as Move hardware knobs, used for LED addressing)
 const KNOB_CCS = [71, 72, 73, 74, 75, 76, 77, 78];
 
-// Navigation CCs sent to Ableton
-const CC_DEVICE_LEFT = 80;
-const CC_DEVICE_RIGHT = 81;
-const CC_LEARN_TOGGLE = 84;
-
-// SysEx protocol
+// SysEx protocol (for variable-length string/bulk data only)
 const SYSEX_HEADER = [0xf0, 0x00, 0x7d, 0x01];
 
-// SysEx commands: Live -> Move
+// SysEx commands: Live -> Move (string/bulk data — must stay SysEx)
 const CMD_DEVICE_INFO = 0x01;
 const CMD_PARAM_INFO = 0x02;
-const CMD_DEVICE_COUNT = 0x03;
-const CMD_DEVICE_INDEX = 0x04;
-// 0x05 was CMD_BANK_INFO (removed)
 const CMD_LEARN_ACK = 0x06;
-const CMD_HEARTBEAT = 0x07;
-const CMD_ALL_VALUES = 0x08;
 const CMD_PAGE_INFO = 0x09;
 const CMD_PAGE_NAME = 0x0a;
-const CMD_PARAM_VALUE_STRING = 0x0b; // Live -> Move: knob_idx, value string
-const CMD_PARAM_STEPS = 0x0c; // Live -> Move: 8 step counts (0=continuous)
-const CMD_SLOT_SUBPAGE_INFO = 0x0d; // Live -> Move: per-slot [subpage_count, active_subpage] (offset +1)
-const CMD_DEVICE_LIST_RESPONSE = 0x0e; // Live -> Move: offset, total, name1\0, name2\0, ...
+const CMD_PARAM_VALUE_STRING = 0x0b;
+const CMD_PARAM_STEPS = 0x0c;
+const CMD_SLOT_SUBPAGE_INFO = 0x0d;
+const CMD_DEVICE_LIST_RESPONSE = 0x0e;
 
-// SysEx commands: Move -> Live
+// Note commands: Live -> Move (simple data — note=cmd, velocity=value)
+const CMD_DEVICE_COUNT = 0x03;    // vel = count
+const CMD_DEVICE_INDEX = 0x04;    // vel = index
+const CMD_HEARTBEAT = 0x07;       // vel = 1
+const CMD_FAV_ADD_ACK = 0x0f;     // vel = fav_index * 16 + result + 1
+const CMD_SET_ADD_ACK = 0x20;     // vel = set_index * 16 + result + 1
+
+// Note commands: Move -> Live (simple triggers — note=cmd, velocity=value)
 const CMD_HELLO = 0x10;
 const CMD_LEARN_START = 0x11;
 const CMD_LEARN_STOP = 0x12;
-const CMD_LEARN_KNOB = 0x13;
-const CMD_KNOB_VALUE = 0x14; // Move -> Live: knob_idx, value (0-127)
-const CMD_NAV_DEVICE = 0x17; // Move -> Live: direction (-1 or +1 as 0x00/0x01)
+const CMD_LEARN_KNOB = 0x13;          // vel = knob_idx + 1
 const CMD_REQUEST_STATE = 0x15;
-const CMD_UNMAP_KNOB = 0x16;
-const CMD_PAGE_CHANGE = 0x18; // Move -> Live: pageIndex
-const CMD_REQUEST_VALUE_STRING = 0x19; // Move -> Live: knob_idx
-const CMD_PAGE_SEQUENTIAL = 0x1a; // Move -> Live: direction (0x00=prev, 0x01=next)
-const CMD_RESET_PARAM = 0x1b;    // Move -> Live: knob_idx (reset to default value)
-const CMD_DEVICE_LIST_REQUEST = 0x1c; // Move -> Live: offset (request 8 device names)
-const CMD_DEVICE_SELECT = 0x1d;       // Move -> Live: device_index (select by flat index)
-const CMD_FAV_ADD = 0x1e;             // Move -> Live: fav_index (0/1), knob_idx
-const CMD_FAV_ADD_ACK = 0x0f;         // Live -> Move: fav_index, result (0=ok, 1=full, 2=no binding)
-const CMD_SET_ADD = 0x1f;             // Move -> Live: set_index (0/1), knob_idx
-const CMD_SET_ADD_ACK = 0x20;         // Live -> Move: set_index, result (0=ok, 1=full, 2=no binding)
+const CMD_UNMAP_KNOB = 0x16;          // vel = knob_idx + 1
+const CMD_NAV_DEVICE = 0x17;          // vel = direction + 1 (0x00→1, 0x01→2)
+const CMD_PAGE_CHANGE = 0x18;         // vel = slotIdx + 1
+const CMD_REQUEST_VALUE_STRING = 0x19; // vel = knob_idx + 1
+const CMD_PAGE_SEQUENTIAL = 0x1a;     // vel = direction + 1
+const CMD_RESET_PARAM = 0x1b;         // vel = knob_idx + 1
+const CMD_DEVICE_LIST_REQUEST = 0x1c;  // vel = offset + 1
+const CMD_DEVICE_SELECT = 0x1d;        // vel = device_index + 1
+const CMD_FAV_ADD = 0x1e;              // vel = fav_index * 16 + knob_idx + 1
+const CMD_SET_ADD = 0x1f;              // vel = set_index * 16 + knob_idx + 1
 
 // Timing
 const HEARTBEAT_TIMEOUT_TICKS = 720; // ~3 seconds at ~240fps (tick rate is faster than expected)
@@ -218,19 +212,22 @@ function sendSysEx(data) {
   }
 }
 
-function sendCommand(cmd, dataBytes) {
-  const msg = [...SYSEX_HEADER, cmd, ...dataBytes, 0xf7];
-  sendSysEx(msg);
+function sendNote(note, velocity) {
+  move_midi_external_send([
+    (CABLE << 4) | 0x09, // CIN for Note On
+    0x90 | MIDI_CHANNEL,
+    note,
+    velocity,
+  ]);
 }
 
 function sendCC(cc, value) {
-  const packet = [
+  move_midi_external_send([
     (CABLE << 4) | 0x0b, // CIN for CC
     0xb0 | MIDI_CHANNEL,
     cc,
     value,
-  ];
-  move_midi_external_send(packet);
+  ]);
 }
 
 /* ============================================================================
@@ -268,11 +265,15 @@ function processMidiExternal(data) {
     return;
   }
 
+  // Note On on our channel — command dispatch
+  if (status === 0x90 && (data[0] & 0x0f) === MIDI_CHANNEL) {
+    handleNoteFromAbleton(data[1], data[2]);
+    return;
+  }
+
   // CC on our channel
   if (status === 0xb0 && (data[0] & 0x0f) === MIDI_CHANNEL) {
-    const cc = data[1];
-    const value = data[2];
-    handleCCFromAbleton(cc, value);
+    handleCCFromAbleton(data[1], data[2]);
   }
 }
 
@@ -309,22 +310,6 @@ function handleSysEx(msg) {
       }
       break;
 
-    case CMD_DEVICE_COUNT:
-      if (payload.length >= 1) {
-        deviceCount = payload[0];
-        updateNavLEDs();
-        needsRedraw = true;
-      }
-      break;
-
-    case CMD_DEVICE_INDEX:
-      if (payload.length >= 1) {
-        deviceIndex = payload[0];
-        updateNavLEDs();
-        needsRedraw = true;
-      }
-      break;
-
     case CMD_PAGE_INFO:
       if (payload.length >= 2) {
         currentPage = payload[0];
@@ -340,18 +325,6 @@ function handleSysEx(msg) {
           setActiveSub = Math.max(0, payload[7] - 1);
         }
         updateStepLEDs();
-        needsRedraw = true;
-      }
-      break;
-
-    case CMD_FAV_ADD_ACK:
-    case CMD_SET_ADD_ACK:
-      if (payload.length >= 2) {
-        const result = payload[1];
-        if (result === 0) favFeedbackText = "Added";
-        else if (result === 1) favFeedbackText = "Full";
-        else favFeedbackText = "Empty";
-        favFeedbackTimer = 180;
         needsRedraw = true;
       }
       break;
@@ -376,24 +349,6 @@ function handleSysEx(msg) {
       }
       break;
 
-    case CMD_HEARTBEAT:
-      connected = true;
-      heartbeatTimer = 0;
-      needsRedraw = true;
-      break;
-
-    case CMD_KNOB_VALUE:
-      // Single knob value update from Ableton
-      if (payload.length >= 2) {
-        const ki = payload[0];
-        if (ki >= 0 && ki < 8) {
-          paramValues[ki] = payload[1];
-          buttonLed(KNOB_CCS[ki], valueToKnobColor(paramValues[ki], learnMode));
-          needsRedraw = true;
-        }
-      }
-      break;
-
     case CMD_PARAM_VALUE_STRING:
       if (payload.length >= 2) {
         const vi = payload[0];
@@ -404,14 +359,6 @@ function handleSysEx(msg) {
           needsRedraw = true;
         }
       }
-      break;
-
-    case CMD_ALL_VALUES:
-      for (let i = 0; i < Math.min(8, payload.length); i++) {
-        paramValues[i] = payload[i];
-      }
-      updateKnobLEDs();
-      needsRedraw = true;
       break;
 
     case CMD_PARAM_STEPS:
@@ -452,11 +399,44 @@ function handleSysEx(msg) {
   }
 }
 
+function handleNoteFromAbleton(note, vel) {
+  switch (note) {
+    case CMD_HEARTBEAT:
+      connected = true;
+      heartbeatTimer = 0;
+      needsRedraw = true;
+      break;
+
+    case CMD_DEVICE_COUNT:
+      deviceCount = vel;
+      updateNavLEDs();
+      needsRedraw = true;
+      break;
+
+    case CMD_DEVICE_INDEX:
+      deviceIndex = vel;
+      updateNavLEDs();
+      needsRedraw = true;
+      break;
+
+    case CMD_FAV_ADD_ACK:
+    case CMD_SET_ADD_ACK: {
+      const result = (vel - 1) & 0x0f;
+      if (result === 0) favFeedbackText = "Added";
+      else if (result === 1) favFeedbackText = "Full";
+      else favFeedbackText = "Empty";
+      favFeedbackTimer = 180;
+      needsRedraw = true;
+      break;
+    }
+  }
+}
+
 function handleCCFromAbleton(cc, value) {
-  // Parameter value feedback from Ableton
-  const idx = KNOB_CCS.indexOf(cc);
-  if (idx >= 0) {
-    paramValues[idx] = value;
+  // Knob value feedback from Ableton (CC 0-7)
+  if (cc >= 0 && cc < 8) {
+    paramValues[cc] = value;
+    buttonLed(KNOB_CCS[cc], valueToKnobColor(value, learnMode));
     needsRedraw = true;
   }
 }
@@ -508,7 +488,7 @@ function handleInternalCC(cc, value) {
     if (value > 63 && !deviceBrowseMode) {
       deviceBrowseMode = true;
       deviceBrowseOffset = 0;
-      sendCommand(CMD_DEVICE_LIST_REQUEST, [0]);
+      sendNote(CMD_DEVICE_LIST_REQUEST, 0 + 1);
       needsRedraw = true;
     } else if (value <= 63 && deviceBrowseMode) {
       deviceBrowseMode = false;
@@ -523,13 +503,13 @@ function handleInternalCC(cc, value) {
     if (cc === MoveLeft && value > 63) {
       if (deviceBrowseOffset > 0) {
         const newOffset = Math.max(0, deviceBrowseOffset - 8);
-        sendCommand(CMD_DEVICE_LIST_REQUEST, [newOffset]);
+        sendNote(CMD_DEVICE_LIST_REQUEST, newOffset + 1);
       }
       return;
     }
     if (cc === MoveRight && value > 63) {
       if (deviceBrowseOffset + 8 < deviceBrowseTotal) {
-        sendCommand(CMD_DEVICE_LIST_REQUEST, [deviceBrowseOffset + 8]);
+        sendNote(CMD_DEVICE_LIST_REQUEST, deviceBrowseOffset + 8 + 1);
       }
       return;
     }
@@ -541,7 +521,7 @@ function handleInternalCC(cc, value) {
   if (cc === MoveBack && value > 63) {
     if (learnMode) {
       learnMode = false;
-      sendCommand(CMD_LEARN_STOP, []);
+      sendNote(CMD_LEARN_STOP, 1);
       needsRedraw = true;
       return;
     }
@@ -560,18 +540,18 @@ function handleInternalCC(cc, value) {
   // Menu button - toggle learn mode
   if (cc === MoveMenu && value > 63) {
     learnMode = !learnMode;
-    sendCommand(learnMode ? CMD_LEARN_START : CMD_LEARN_STOP, []);
+    sendNote(learnMode ? CMD_LEARN_START : CMD_LEARN_STOP, 1);
     needsRedraw = true;
     return;
   }
 
   // Arrow keys - device navigation
   if (cc === MoveLeft && value > 63) {
-    sendCommand(CMD_NAV_DEVICE, [0x00]); // left = -1
+    sendNote(CMD_NAV_DEVICE, 0x00 + 1); // left = -1
     return;
   }
   if (cc === MoveRight && value > 63) {
-    sendCommand(CMD_NAV_DEVICE, [0x01]); // right = +1
+    sendNote(CMD_NAV_DEVICE, 0x01 + 1); // right = +1
     return;
   }
   // Up/Down arrows currently unused (banks removed, pages use step buttons)
@@ -580,9 +560,9 @@ function handleInternalCC(cc, value) {
   if (cc === MoveMainKnob) {
     const delta = decodeDelta(value);
     if (delta > 0) {
-      sendCommand(CMD_PAGE_SEQUENTIAL, [0x01]);
+      sendNote(CMD_PAGE_SEQUENTIAL, 0x01 + 1);
     } else if (delta < 0) {
-      sendCommand(CMD_PAGE_SEQUENTIAL, [0x00]);
+      sendNote(CMD_PAGE_SEQUENTIAL, 0x00 + 1);
     }
     return;
   }
@@ -600,7 +580,7 @@ function handleKnobTurn(idx, rawValue) {
 
   if (learnMode) {
     // In learn mode, twist a knob to bind it
-    sendCommand(CMD_LEARN_KNOB, [idx]);
+    sendNote(CMD_LEARN_KNOB, idx + 1);
     return;
   }
 
@@ -631,8 +611,8 @@ function handleKnobTurn(idx, rawValue) {
   overlayKnob = idx;
   overlayTimer = OVERLAY_HOLD_TICKS;
 
-  // Send absolute value to Ableton via SysEx (CC doesn't pass through Standalone Port)
-  sendCommand(CMD_KNOB_VALUE, [idx, paramValues[idx]]);
+  // Send absolute value to Ableton
+  sendCC(idx, paramValues[idx]);
 
   // Update this knob's LED immediately
   const colour = valueToKnobColor(paramValues[idx], learnMode);
@@ -655,7 +635,7 @@ function handleInternalNoteOn(note, velocity) {
     }
     // Fav held + touch = add binding to favourite page
     if (favHeld >= 0 && connected && paramNames[note]) {
-      sendCommand(CMD_FAV_ADD, [favHeld, note]);
+      sendNote(CMD_FAV_ADD, favHeld * 16 + note + 1);
       favUsedAsModifier = true;
       overlayKnob = note;
       overlayTimer = OVERLAY_HOLD_TICKS;
@@ -664,7 +644,7 @@ function handleInternalNoteOn(note, velocity) {
     }
     // Set held + touch = add binding to set page
     if (setHeld >= 0 && connected && paramNames[note]) {
-      sendCommand(CMD_SET_ADD, [setHeld, note]);
+      sendNote(CMD_SET_ADD, setHeld * 16 + note + 1);
       setUsedAsModifier = true;
       overlayKnob = note;
       overlayTimer = OVERLAY_HOLD_TICKS;
@@ -673,13 +653,13 @@ function handleInternalNoteOn(note, velocity) {
     }
     // Delete held + touch = unmap knob
     if (deleteHeld && !learnMode && connected && paramNames[note]) {
-      sendCommand(CMD_UNMAP_KNOB, [note]);
+      sendNote(CMD_UNMAP_KNOB, note + 1);
       needsRedraw = true;
       return;
     }
     // Shift held + touch = reset param to default
     if (shiftHeld && !learnMode && connected && paramNames[note]) {
-      sendCommand(CMD_RESET_PARAM, [note]);
+      sendNote(CMD_RESET_PARAM, note + 1);
       overlayKnob = note;
       overlayTimer = OVERLAY_HOLD_TICKS;
       needsRedraw = true;
@@ -687,13 +667,13 @@ function handleInternalNoteOn(note, velocity) {
     }
     // In learn mode, touching a knob is enough to bind it
     if (learnMode && connected) {
-      sendCommand(CMD_LEARN_KNOB, [note]);
+      sendNote(CMD_LEARN_KNOB, note + 1);
     }
     // Show overlay on touch if param is mapped
     if (!learnMode && connected && paramNames[note]) {
       overlayKnob = note;
       overlayTimer = OVERLAY_HOLD_TICKS;
-      sendCommand(CMD_REQUEST_VALUE_STRING, [note]);
+      sendNote(CMD_REQUEST_VALUE_STRING, note + 1);
     }
     needsRedraw = true;
     return;
@@ -706,12 +686,12 @@ function handleInternalNoteOn(note, velocity) {
     if (deviceBrowseMode) {
       const devIdx = deviceBrowseOffset + slotIdx;
       if (devIdx < deviceBrowseTotal && deviceBrowseNames[slotIdx]) {
-        sendCommand(CMD_DEVICE_SELECT, [devIdx]);
+        sendNote(CMD_DEVICE_SELECT, devIdx + 1);
       }
       return;
     }
     // Normal mode: switch slot (Ableton resolves to page)
-    sendCommand(CMD_PAGE_CHANGE, [slotIdx]);
+    sendNote(CMD_PAGE_CHANGE, slotIdx + 1);
     return;
   }
 
@@ -746,7 +726,7 @@ function handleInternalNoteOff(note) {
         if (connected && paramNames[prev]) {
           overlayKnob = prev;
           overlayTimer = OVERLAY_HOLD_TICKS;
-          sendCommand(CMD_REQUEST_VALUE_STRING, [prev]);
+          sendNote(CMD_REQUEST_VALUE_STRING, prev + 1);
         }
       } else {
         marqueeKnob = -1;
@@ -762,7 +742,7 @@ function handleInternalNoteOff(note) {
   if (note >= FAV_STEP_NOTE_BASE && note < FAV_STEP_NOTE_BASE + 2) {
     const fi = note - FAV_STEP_NOTE_BASE;
     if (fi === favHeld && !favUsedAsModifier) {
-      sendCommand(CMD_PAGE_CHANGE, [8 + fi]);
+      sendNote(CMD_PAGE_CHANGE, 8 + fi + 1);
     }
     favHeld = -1;
     favUsedAsModifier = false;
@@ -773,7 +753,7 @@ function handleInternalNoteOff(note) {
   if (note >= SET_STEP_NOTE_BASE && note < SET_STEP_NOTE_BASE + 2) {
     const si = note - SET_STEP_NOTE_BASE;
     if (si === setHeld && !setUsedAsModifier) {
-      sendCommand(CMD_PAGE_CHANGE, [10 + si]);
+      sendNote(CMD_PAGE_CHANGE, 10 + si + 1);
     }
     setHeld = -1;
     setUsedAsModifier = false;
@@ -1295,7 +1275,7 @@ function init() {
 
   // Say hello to Ableton
   console.log("[DC] Module initialized");
-  sendCommand(CMD_HELLO, []);
+  sendNote(CMD_HELLO, 1);
 }
 
 function tick() {
