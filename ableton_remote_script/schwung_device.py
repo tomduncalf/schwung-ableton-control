@@ -73,6 +73,10 @@ CMD_TRACK_LIST_RESPONSE = 0x12  # SysEx: Live -> Move
 CMD_NOTE_MODE = 0x21        # Move -> Live: vel = 1+1 (on) or 0+1 (off)
 CMD_OCTAVE = 0x22           # Move -> Live: vel = 1+1 (up) or 0+1 (down)
 
+# Snapshot commands
+CMD_SNAPSHOT_STORE = 0x25    # Move -> Live: capture all set param values
+CMD_SNAPSHOT_RECALL = 0x26   # Move -> Live: restore captured values
+
 # SysEx commands: Live -> Move (note layout info for pad coloring)
 CMD_NOTE_LAYOUT_INFO = 0x11  # root_note, is_in_key, interval, scale_notes...
 
@@ -127,6 +131,9 @@ class SchwungDeviceControl(ControlSurface):
         self._set_file_path_cache = None  # last known song file_path
 
         self._bindings_mtimes = {}  # {device_hash: mtime}
+
+        # Snapshot: list of (param_ref, value) for set page recall
+        self._snapshot = None
 
         super().__init__(*a, **k)
         self.log_message('SchwungDeviceControl: initializing (v3)')
@@ -311,7 +318,8 @@ class SchwungDeviceControl(ControlSurface):
                       CMD_PAGE_CHANGE, CMD_REQUEST_VALUE_STRING, CMD_PAGE_SEQUENTIAL,
                       CMD_RESET_PARAM, CMD_DEVICE_LIST_REQUEST, CMD_DEVICE_SELECT,
                       CMD_FAV_ADD, CMD_SET_ADD, CMD_NOTE_MODE, CMD_OCTAVE,
-                      CMD_TRACK_LIST_REQUEST, CMD_TRACK_SELECT]:
+                      CMD_TRACK_LIST_REQUEST, CMD_TRACK_SELECT,
+                      CMD_SNAPSHOT_STORE, CMD_SNAPSHOT_RECALL]:
             Live.MidiMap.forward_midi_note(self._c_instance.handle(), midi_map_handle, MIDI_CHANNEL, note)
         # Forward knob value CCs 0-7 (ch16)
         for cc in KNOB_VALUE_CCS:
@@ -409,6 +417,10 @@ class SchwungDeviceControl(ControlSurface):
             self._send_track_list(v)
         elif note == CMD_TRACK_SELECT:
             self._select_track_by_index(v)
+        elif note == CMD_SNAPSHOT_STORE:
+            self._snapshot_store()
+        elif note == CMD_SNAPSHOT_RECALL:
+            self._snapshot_recall()
 
     def _process_sysex(self, midi_bytes):
         self.log_message('SchwungDeviceControl SYSEX len={}: {}'.format(
@@ -1690,9 +1702,51 @@ class SchwungDeviceControl(ControlSurface):
                     self._send_full_state()
 
     # =========================================================================
-    # Hashing
+    # Snapshot (set page capture/recall)
     # =========================================================================
 
+    def _snapshot_store(self):
+        """Capture current values of all params across all set pages."""
+        set_pages = self._set_bindings.get('pages', [])
+        snapshot = []
+        for page in set_pages:
+            for binding in page.get('knobs', [None] * 8):
+                if binding is None:
+                    continue
+                device_hash = binding.get('device_hash')
+                if not device_hash:
+                    continue
+                device = self._find_device_by_hash(device_hash)
+                if not device:
+                    continue
+                param = self._resolve_param(device, binding)
+                if param is not None:
+                    snapshot.append((param, param.value))
+        self._snapshot = snapshot
+        self.log_message('SchwungDeviceControl: snapshot stored ({} params)'.format(len(snapshot)))
+
+    def _snapshot_recall(self):
+        """Restore all params to their snapshot values."""
+        if not self._snapshot:
+            self.log_message('SchwungDeviceControl: no snapshot to recall')
+            return
+        count = 0
+        for param, value in self._snapshot:
+            try:
+                param.value = value
+                count += 1
+            except:
+                pass
+        self.log_message('SchwungDeviceControl: snapshot recalled ({} params)'.format(count))
+        # Update Move's knob values/LEDs for the active page
+        for i in range(8):
+            self._suppressing_feedback[i] = True
+            self._send_param_value(i)
+            self._send_param_value_string(i)
+
+    # =========================================================================
+    # Hashing
+    # =========================================================================
 
     def _get_device_hash(self, device):
         key = '{}:{}'.format(device.class_name, device.name)

@@ -31,6 +31,8 @@ import {
   MoveMainKnob,
   MoveMainButton,
   MoveDelete,
+  MoveCapture,
+  MoveSample,
   MoveRow1,
   MoveRow3,
   MoveRow4,
@@ -99,6 +101,8 @@ const CMD_TRACK_SELECT = 0x24;         // vel = track_index + 1
 // Note mode commands
 const CMD_NOTE_MODE = 0x21;            // vel = 1+1 (on) or 0+1 (off)
 const CMD_OCTAVE = 0x22;               // vel = 1+1 (up) or 0+1 (down)
+const CMD_SNAPSHOT_STORE = 0x25;       // capture all set param values
+const CMD_SNAPSHOT_RECALL = 0x26;      // restore captured values
 const CMD_NOTE_LAYOUT_INFO = 0x11;     // SysEx: root_note, is_in_key, interval, scale_notes...
 
 // Pad note range (same as Move hardware)
@@ -817,6 +821,24 @@ function handleInternalCC(cc, value) {
     return;
   }
 
+  // Capture button - snapshot store
+  if (cc === MoveCapture && value > 63) {
+    sendNote(CMD_SNAPSHOT_STORE, 1);
+    favFeedbackText = "Snapshot saved";
+    favFeedbackTimer = 180;
+    needsRedraw = true;
+    return;
+  }
+
+  // Sample button - snapshot recall
+  if (cc === MoveSample && value > 63) {
+    sendNote(CMD_SNAPSHOT_RECALL, 1);
+    favFeedbackText = "Snapshot restored";
+    favFeedbackTimer = 180;
+    needsRedraw = true;
+    return;
+  }
+
   // Menu button - toggle help overlay
   if (cc === MoveMenu && value > 63) {
     helpMode = !helpMode;
@@ -1121,12 +1143,12 @@ function drawScreen() {
   drawFooter();
 
 
-  if (favFeedbackTimer > 0) {
-    drawFavFeedback();
-  }
-
   if (overlayKnob >= 0 && overlayTimer > 0) {
     drawValueOverlay();
+  }
+
+  if (favFeedbackTimer > 0) {
+    drawFavFeedback();
   }
 }
 
