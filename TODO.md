@@ -1,5 +1,2 @@
 - Note entry
-- Learn whole-set controls
-  - File alongside set?
-  - For set duplicates, fallback to most recent in dir?
-- Make params array
+- Code review
