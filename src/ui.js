@@ -68,8 +68,6 @@ const CMD_SLOT_SUBPAGE_INFO = 0x0d;
 const CMD_DEVICE_LIST_RESPONSE = 0x0e;
 
 // Note commands: Live -> Move (simple data — note=cmd, velocity=value)
-const CMD_DEVICE_COUNT = 0x03;    // vel = count
-const CMD_DEVICE_INDEX = 0x04;    // vel = index
 const CMD_HEARTBEAT = 0x07;       // vel = 1
 const CMD_FAV_ADD_ACK = 0x0f;     // vel = fav_index * 16 + result + 1
 const CMD_SET_ADD_ACK = 0x20;     // vel = set_index * 16 + result + 1

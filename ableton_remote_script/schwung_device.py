@@ -37,8 +37,6 @@ CMD_SLOT_SUBPAGE_INFO = 0x0D
 CMD_DEVICE_LIST_RESPONSE = 0x0E
 
 # Note commands: Live -> Move (note=cmd, velocity=value)
-CMD_DEVICE_COUNT = 0x03
-CMD_DEVICE_INDEX = 0x04
 CMD_HEARTBEAT = 0x07
 CMD_FAV_ADD_ACK = 0x0F     # vel = fav_index * 16 + result + 1
 CMD_SET_ADD_ACK = 0x20      # vel = set_index * 16 + result + 1
@@ -369,8 +367,7 @@ class SchwungDeviceControl(ControlSurface):
         self.log_message('SchwungDeviceControl: reset knob {} to default'.format(knob_idx))
 
     def _navigate_device(self, direction):
-        if not self._device_list:
-            self._device_list = self._get_device_list()
+        self._device_list = self._get_device_list()
         if not self._device_list:
             return
 
@@ -388,8 +385,7 @@ class SchwungDeviceControl(ControlSurface):
 
     def _send_device_list(self, offset):
         """Send up to 8 device names starting at offset."""
-        if not self._device_list:
-            self._device_list = self._get_device_list()
+        self._device_list = self._get_device_list()
         total = len(self._device_list)
         payload = [min(127, offset), min(127, total)]
         for i in range(8):
@@ -401,8 +397,7 @@ class SchwungDeviceControl(ControlSurface):
 
     def _select_device_by_index(self, index):
         """Select a device by its flat index in the device list."""
-        if not self._device_list:
-            self._device_list = self._get_device_list()
+        self._device_list = self._get_device_list()
         if index < 0 or index >= len(self._device_list):
             return
         device = self._device_list[index]
@@ -614,7 +609,7 @@ class SchwungDeviceControl(ControlSurface):
 
         # Copy binding
         fav_knobs[free_slot] = copy.deepcopy(source_binding)
-        self._save_bindings()
+        self._save_bindings(device_hash)
 
         self._send_note(CMD_FAV_ADD_ACK, fav_index * 16 + 0 + 1)  # success
         self.log_message('SchwungDeviceControl: fav add slot={} knob={} -> fav {} knob {}'.format(
@@ -799,8 +794,14 @@ class SchwungDeviceControl(ControlSurface):
         return candidates[0][1]
 
     def _load_set_bindings(self):
-        """Load set bindings from most recent file in project directory."""
-        path = self._find_most_recent_set_bindings()
+        """Load set bindings — prefer exact sidecar for current set, fall back to most recent."""
+        path = self._get_set_bindings_path()
+        if path and not os.path.isfile(path):
+            path = self._find_most_recent_set_bindings()
+            if path:
+                self.log_message('SchwungDeviceControl: exact sidecar not found, falling back to {}'.format(path))
+        if not path:
+            path = self._find_most_recent_set_bindings()
         if path:
             try:
                 with open(path, 'r') as f:
@@ -852,9 +853,20 @@ class SchwungDeviceControl(ControlSurface):
         return False
 
     def _check_set_bindings_file(self):
-        """Reload set bindings file if modified externally."""
+        """Reload set bindings file if modified externally, clear if deleted."""
         path = self._set_bindings_source_path
-        if not path or not os.path.isfile(path):
+        if not path:
+            return
+        if not os.path.isfile(path):
+            # File was deleted externally — clear in-memory set bindings
+            if self._set_bindings:
+                self._set_bindings = {}
+                self._set_bindings_source_path = None
+                self._set_bindings_mtime = None
+                self.log_message('SchwungDeviceControl: set bindings file deleted, cleared in-memory state')
+                if self._connected and self._current_slot == 9:
+                    self._remove_all_param_listeners()
+                    self._send_full_state()
             return
         try:
             mtime = os.path.getmtime(path)
@@ -965,7 +977,7 @@ class SchwungDeviceControl(ControlSurface):
                 steps.append(min(127, self._get_param_num_steps(p)) + 1)
         self._send_sysex(CMD_PARAM_STEPS, steps)
 
-        self._save_bindings()
+        self._save_bindings(device_hash)
         self.log_message('SchwungDeviceControl: learned knob {} -> {} ({})'.format(
             knob_idx, param.name, device.name))
 
@@ -1043,7 +1055,7 @@ class SchwungDeviceControl(ControlSurface):
                 pages = device_entry.get('pages', [])
                 if self._current_page < len(pages):
                     pages[self._current_page]['knobs'][knob_idx] = None
-                    self._save_bindings()
+                    self._save_bindings(device_hash)
 
         # Send updated param info (empty)
         self._send_sysex(CMD_PARAM_INFO, [knob_idx] + self._encode_string('', MAX_PARAM_NAME_LEN) + [0])
@@ -1087,7 +1099,7 @@ class SchwungDeviceControl(ControlSurface):
         else:
             self._current_page = 0
 
-        self._save_bindings()
+        self._save_bindings(device_hash)
         self._apply_bindings_for_device(device)
         if self._connected:
             self._send_full_state()
@@ -1317,6 +1329,11 @@ class SchwungDeviceControl(ControlSurface):
             for i in range(8):
                 self._send_sysex(CMD_PARAM_INFO, [i, 0])  # index + null terminator (empty name)
                 sleep(SYSEX_DELAY)
+            # Zero knob values, step counts, and subpage info so Move clears stale LEDs
+            for i in range(8):
+                self._send_cc(i, 0)
+            self._send_sysex(CMD_PARAM_STEPS, [1] * 8)
+            self._send_sysex(CMD_SLOT_SUBPAGE_INFO, [2, 1])  # 1 slot, 1 subpage (offset +1)
             return
 
         # Device info: name + null + count + index
@@ -1484,10 +1501,11 @@ class SchwungDeviceControl(ControlSurface):
         self._schedule_heartbeat()
 
     def _check_bindings_file(self):
-        """Reload any device binding files modified externally."""
+        """Reload any device binding files modified externally, remove deleted ones."""
         if not os.path.isdir(_DEVICES_DIR):
             return
         changed = False
+        seen_hashes = set()
         for fname in os.listdir(_DEVICES_DIR):
             if not fname.endswith('.json'):
                 continue
@@ -1497,6 +1515,7 @@ class SchwungDeviceControl(ControlSurface):
             except OSError:
                 continue
             device_hash = fname.rsplit('_', 1)[-1].replace('.json', '')
+            seen_hashes.add(device_hash)
             if self._bindings_mtimes.get(device_hash) == mtime:
                 continue
             changed = True
@@ -1508,6 +1527,13 @@ class SchwungDeviceControl(ControlSurface):
                 self.log_message('SchwungDeviceControl: reloaded {}'.format(fname))
             except Exception as e:
                 self.log_message('SchwungDeviceControl: reload error {}: {}'.format(fname, e))
+        # Remove in-memory bindings whose files were deleted
+        for device_hash in list(self._bindings.keys()):
+            if device_hash not in seen_hashes:
+                del self._bindings[device_hash]
+                self._bindings_mtimes.pop(device_hash, None)
+                self.log_message('SchwungDeviceControl: cleared deleted bindings for {}'.format(device_hash))
+                changed = True
         if changed:
             device = self._selected_device
             if device:
@@ -1563,22 +1589,22 @@ class SchwungDeviceControl(ControlSurface):
         safe = self._sanitize_filename(device_name)
         return os.path.join(_DEVICES_DIR, '{}_{}.json'.format(safe, device_hash))
 
-    def _save_bindings(self):
+    def _save_bindings(self, only_hash=None):
         if not os.path.isdir(_DEVICES_DIR):
             os.makedirs(_DEVICES_DIR)
         try:
-            for device_hash, entry in self._bindings.items():
-                # Sort pages by slot for readable JSON
+            items = [(only_hash, self._bindings[only_hash])] if only_hash else self._bindings.items()
+            for device_hash, entry in items:
+                # Sort pages by slot for readable JSON only — don't mutate in-memory order
                 pages = entry.get('pages', [])
                 sorted_pages = sorted(pages, key=lambda p: p.get('slot', 0))
-                sorted_entry = {}
+                serialized = {}
                 if 'deviceName' in entry:
-                    sorted_entry['deviceName'] = entry['deviceName']
-                sorted_entry['pages'] = sorted_pages
-                self._bindings[device_hash] = sorted_entry
+                    serialized['deviceName'] = entry['deviceName']
+                serialized['pages'] = sorted_pages
                 fpath = self._device_file_path(device_hash)
                 with open(fpath, 'w') as f:
-                    json.dump(sorted_entry, f, indent=2)
+                    json.dump(serialized, f, indent=2)
                 self._bindings_mtimes[device_hash] = os.path.getmtime(fpath)
             self.log_message('SchwungDeviceControl: bindings saved')
         except Exception as e:

@@ -9,10 +9,8 @@ MOVE_HOST="${MOVE_HOST:-move.local}"
 MOVE_USER="${MOVE_USER:-ableton}"
 REMOTE_PATH="/data/UserData/schwung/modules/tools/$MODULE_ID"
 
-# Build first if needed
-if [ ! -f "$DIST_DIR/${MODULE_ID}-module.tar.gz" ]; then
-    bash "$SCRIPT_DIR/build.sh"
-fi
+# Always rebuild to avoid deploying stale dist/
+bash "$SCRIPT_DIR/build.sh"
 
 echo "Installing $MODULE_ID to $MOVE_USER@$MOVE_HOST..."
 
