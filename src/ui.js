@@ -1287,7 +1287,7 @@ function drawParamsClassic() {
 
     const name = paramNames[i] || "";
     const value = paramValues[i];
-    const touched = touchedKnob === i;
+    const touched = touchStack.indexOf(i) >= 0;
 
     if (touched && name) {
       fill_rect(x, y - 1, colWidth, rowHeight, 1);
@@ -1351,7 +1351,7 @@ function drawParamsCompact() {
 
     const name = paramNames[i] || "";
     const value = paramValues[i];
-    const touched = touchedKnob === i;
+    const touched = touchStack.indexOf(i) >= 0;
 
     if (!name) continue;
 

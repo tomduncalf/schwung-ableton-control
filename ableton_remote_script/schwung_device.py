@@ -1126,8 +1126,12 @@ class SchwungDeviceControl(ControlSurface):
     def _learn_set_knob(self, knob_idx):
         """Learn a knob on the current set page (cross-device binding)."""
         param = self.song.view.selected_parameter
-        device = self._get_selected_device()
-        if param is None or device is None:
+        if param is None:
+            return
+
+        # Derive device from the parameter itself, so we can learn from any device in the set
+        device = param.canonical_parent
+        if device is None:
             return
 
         param_index = None
