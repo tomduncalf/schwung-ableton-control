@@ -16,10 +16,13 @@ src/ui.js                           ableton_remote_script/schwung_device.py
 
 ## MIDI Protocol
 
-- **SysEx only** — the Standalone Port only passes SysEx, not CC/Note messages
-- **SysEx header `F0 00 7D 01`** for all communication (values, names, learn, heartbeat)
-- **Ableton MIDI port**: "Ableton Move (Standalone Port)" for both input and output
-- Tick rate on Move is ~240fps (not 44 or 60), affects all timing constants
+Three message types, all on channel 16, over "Ableton Move (Standalone Port)":
+
+- **CC 0-7** — bidirectional knob values. Move sends on encoder turn, Ableton sends for LED feedback. Forwarded via `forward_midi_cc`.
+- **Note On (0x90)** — command protocol. Note number = command ID, velocity = value (+1 offset to avoid zero). Used for heartbeat, learn mode, device nav, page changes, etc.
+- **SysEx (`F0 00 7D 01`)** — variable-length data (device/param names, page info, value strings, device lists). Ableton→Move only.
+
+Tick rate on Move is ~240fps (not 44 or 60), affects all timing constants.
 
 ## Key Files
 

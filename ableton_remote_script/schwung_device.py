@@ -332,13 +332,13 @@ class SchwungDeviceControl(ControlSurface):
         if param.is_quantized:
             new_value = round(new_value)
 
-        # Suppress feedback to avoid echo loop
+        # Suppress feedback to avoid echo loop — flag stays set until the
+        # listener fires (async), so the echoed value_listener call is skipped.
         self._suppressing_feedback[knob_idx] = True
         try:
             param.value = new_value
         except:
             pass
-        self._suppressing_feedback[knob_idx] = False
 
         # Send formatted value string for overlay display
         self._send_param_value_string(knob_idx)
@@ -354,7 +354,6 @@ class SchwungDeviceControl(ControlSurface):
             param.value = param.default_value
         except:
             pass
-        self._suppressing_feedback[knob_idx] = False
         self._send_param_value(knob_idx)
         self._send_param_value_string(knob_idx)
         self.log_message('SchwungDeviceControl: reset knob {} to default'.format(knob_idx))
@@ -1094,9 +1093,11 @@ class SchwungDeviceControl(ControlSurface):
 
         # Create value listener for Live -> Move sync
         def on_value_changed():
-            if not self._suppressing_feedback[knob_idx]:
-                self._send_param_value(knob_idx)
-                self._send_param_value_string(knob_idx)
+            if self._suppressing_feedback[knob_idx]:
+                self._suppressing_feedback[knob_idx] = False
+                return
+            self._send_param_value(knob_idx)
+            self._send_param_value_string(knob_idx)
 
         param.add_value_listener(on_value_changed)
         self._active_listeners[knob_idx] = (param, on_value_changed)
