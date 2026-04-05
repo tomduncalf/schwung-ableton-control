@@ -476,15 +476,21 @@ function processMidiExternal(data) {
 
   // SysEx continuation
   if (sysexBuffer !== null) {
-    for (let i = 0; i < data.length; i++) {
-      sysexBuffer.push(data[i]);
-      if (data[i] === 0xf7) {
-        handleSysEx(sysexBuffer);
-        sysexBuffer = null;
-        return;
+    if (data[0] >= 0x80 && data[0] !== 0xf7) {
+      // Non-SysEx message arrived mid-SysEx — discard incomplete SysEx
+      sysexBuffer = null;
+      // Fall through to process as normal message
+    } else {
+      for (let i = 0; i < data.length; i++) {
+        sysexBuffer.push(data[i]);
+        if (data[i] === 0xf7) {
+          handleSysEx(sysexBuffer);
+          sysexBuffer = null;
+          return;
+        }
       }
+      return;
     }
-    return;
   }
 
   // Note On on our channel — command dispatch
