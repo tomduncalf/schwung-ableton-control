@@ -17,3 +17,16 @@ class Skin:
         NoteInvalid = Rgb.OFF
         NoteSelected = Rgb.WHITE
         NoteInStep = Rgb.WHITE
+
+    class Session:
+        Slot = Rgb.OFF
+        SlotRecordButton = Rgb.RED
+        NoSlot = Rgb.OFF
+        ClipStopped = Rgb.YELLOW
+        ClipTriggeredPlay = Rgb.DIM_GREEN
+        ClipTriggeredRecord = Rgb.DIM_RED
+        ClipPlaying = Rgb.GREEN
+        ClipRecording = Rgb.RED
+        StopClip = Rgb.RED
+        StopClipDisabled = Rgb.OFF
+        StopClipTriggered = Rgb.DIM_RED

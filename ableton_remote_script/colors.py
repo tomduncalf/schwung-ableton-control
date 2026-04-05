@@ -12,3 +12,5 @@ class Rgb:
     BLUE = RgbColor(0, 0, 127)
     CYAN = RgbColor(0, 127, 127)
     DIM_WHITE = RgbColor(40, 40, 40)
+    DIM_GREEN = RgbColor(0, 40, 0)
+    DIM_RED = RgbColor(40, 0, 0)

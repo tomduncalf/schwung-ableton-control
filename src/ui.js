@@ -34,7 +34,7 @@ import {
   MoveCapture,
   MoveSample,
   MoveRow1,
-  MoveRow3,
+  MoveRow2,
   MoveRow4,
   White,
   Black,
@@ -98,17 +98,32 @@ const CMD_SET_ADD = 0x1f;              // vel = set_index * 16 + knob_idx + 1
 const CMD_TRACK_LIST_REQUEST = 0x23;   // vel = offset + 1
 const CMD_TRACK_SELECT = 0x24;         // vel = track_index + 1
 
-// Note mode commands
-const CMD_NOTE_MODE = 0x21;            // vel = 1+1 (on) or 0+1 (off)
+// Pad mode commands
+const CMD_PAD_MODE = 0x21;             // vel = mode+1 (0=off, 1=note, 2=session)
 const CMD_OCTAVE = 0x22;               // vel = 1+1 (up) or 0+1 (down)
 const CMD_SNAPSHOT_STORE = 0x25;       // capture all set param values
 const CMD_SNAPSHOT_RECALL = 0x26;      // restore captured values
 const CMD_NOTE_LAYOUT_INFO = 0x11;     // SysEx: root_note, is_in_key, interval, scale_notes...
+const CMD_SESSION_GRID_COLORS = 0x12;  // SysEx: 32 bytes, one color per pad
+
+// Pad mode constants
+const PAD_MODE_OFF = 0;
+const PAD_MODE_NOTE = 1;
+const PAD_MODE_SESSION = 2;
 
 // Pad note range (same as Move hardware)
 const PAD_NOTE_START = 68;
 const PAD_NOTE_END = 99;
 const PAD_CHANNEL = 0x00;  // channel 1 for pad MIDI (separate from command ch16)
+
+// Session grid color indices (from Ableton)
+const SCLR_OFF = 0;
+const SCLR_PLAYING = 1;
+const SCLR_RECORDING = 2;
+const SCLR_STOPPED = 3;
+const SCLR_TRIGGERED_PLAY = 4;
+const SCLR_TRIGGERED_RECORD = 5;
+const SCLR_ARMED_EMPTY = 6;
 
 // Timing
 const HEARTBEAT_TIMEOUT_TICKS = 720; // ~3 seconds at ~240fps (tick rate is faster than expected)
@@ -198,7 +213,7 @@ let connected = false;
 let heartbeatTimer = 0;
 let reconnectTimer = 0;
 let learnMode = false;
-let noteMode = true;
+let padMode = PAD_MODE_NOTE;
 let helpMode = false;
 
 // Note layout info (from Ableton, for pad coloring)
@@ -206,6 +221,9 @@ let noteLayoutRoot = 0;
 let noteLayoutInKey = true;
 let noteLayoutInterval = 0;
 let noteLayoutScaleNotes = [0, 2, 4, 5, 7, 9, 11];  // default major
+
+// Session grid state (32 color indices from Ableton)
+let sessionGridColors = new Array(32).fill(0);
 let shiftHeld = false;
 let deleteHeld = false;
 let needsRedraw = true;
@@ -333,7 +351,8 @@ function resetUIState() {
   setSubCount = 0;
   setActiveSub = 0;
   learnMode = false;
-  noteMode = true;
+  padMode = PAD_MODE_NOTE;
+  sessionGridColors = new Array(32).fill(0);
   overlayKnob = -1;
   overlayValueStr = "";
   overlayTimer = 0;
@@ -639,11 +658,22 @@ function handleSysEx(msg) {
         for (let i = 3; i < payload.length; i++) {
           noteLayoutScaleNotes.push(payload[i]);
         }
-        if (noteMode) {
+        if (padMode === PAD_MODE_NOTE) {
           updatePadLEDs();
         }
         needsRedraw = true;
       }
+      break;
+
+    case CMD_SESSION_GRID_COLORS:
+      // [color0, color1, ..., color31] — one per pad
+      for (let i = 0; i < Math.min(32, payload.length); i++) {
+        sessionGridColors[i] = payload[i];
+      }
+      if (padMode === PAD_MODE_SESSION) {
+        updateSessionPadLEDs();
+      }
+      needsRedraw = true;
       break;
   }
 }
@@ -661,7 +691,7 @@ function handleNoteFromAbleton(note, vel) {
         updateNavLEDs();
         updatePadLEDs();
         sendNote(CMD_HELLO, 1);
-        sendNote(CMD_NOTE_MODE, 1 + 1);
+        sendNote(CMD_PAD_MODE, padMode + 1);
         console.log("[DC] reconnected, sent HELLO");
       }
       heartbeatTimer = 0;
@@ -732,6 +762,20 @@ function handleInternalCC(cc, value) {
   // Delete (X) button state
   if (cc === MoveDelete) {
     deleteHeld = value > 63;
+    return;
+  }
+
+  // Track 2 button (MoveRow2) — toggle session mode
+  if (cc === MoveRow2 && value > 63) {
+    if (padMode === PAD_MODE_SESSION) {
+      padMode = PAD_MODE_NOTE;
+      updatePadLEDs();
+    } else {
+      padMode = PAD_MODE_SESSION;
+      updateSessionPadLEDs();
+    }
+    sendNote(CMD_PAD_MODE, padMode + 1);
+    needsRedraw = true;
     return;
   }
 
@@ -855,17 +899,17 @@ function handleInternalCC(cc, value) {
     sendNote(CMD_NAV_DEVICE, 0x01 + 1); // right = +1
     return;
   }
-  // Up arrow — octave up
+  // Up arrow — octave up (note mode only)
   if (cc === MoveUp && value > 63) {
-    if (noteMode) {
+    if (padMode === PAD_MODE_NOTE) {
       sendNote(CMD_OCTAVE, 1 + 1);
     }
     return;
   }
 
-  // Down arrow — octave down
+  // Down arrow — octave down (note mode only)
   if (cc === MoveDown && value > 63) {
-    if (noteMode) {
+    if (padMode === PAD_MODE_NOTE) {
       sendNote(CMD_OCTAVE, 0 + 1);
     }
     return;
@@ -937,10 +981,13 @@ function handleKnobTurn(idx, rawValue) {
 }
 
 function handleInternalNoteOn(note, velocity) {
-  // Pad press in note mode — forward to Ableton via PlayableComponent
-  if (noteMode && note >= PAD_NOTE_START && note <= PAD_NOTE_END) {
+  // Pad press in note/session mode — forward to Ableton
+  if (padMode !== PAD_MODE_OFF && note >= PAD_NOTE_START && note <= PAD_NOTE_END) {
     sendPadNoteOn(note, velocity);
-    setLED(note, White);
+    if (padMode === PAD_MODE_NOTE) {
+      setLED(note, White); // flash white on press
+    }
+    // In session mode, don't override LEDs — Ableton sends colors
     return;
   }
 
@@ -1046,10 +1093,13 @@ function handleInternalNoteOn(note, velocity) {
 }
 
 function handleInternalNoteOff(note) {
-  // Pad release in note mode
-  if (noteMode && note >= PAD_NOTE_START && note <= PAD_NOTE_END) {
+  // Pad release in note/session mode
+  if (padMode !== PAD_MODE_OFF && note >= PAD_NOTE_START && note <= PAD_NOTE_END) {
     sendPadNoteOff(note);
-    updateSinglePadLED(note);
+    if (padMode === PAD_MODE_NOTE) {
+      updateSinglePadLED(note);
+    }
+    // In session mode, don't override LEDs
     return;
   }
 
@@ -1602,6 +1652,25 @@ function updateSinglePadLED(note) {
 function clearPadLEDs() {
   for (let i = PAD_NOTE_START; i <= PAD_NOTE_END; i++) {
     setLED(i, Black);
+  }
+}
+
+// Session grid color mapping: color index -> Move LED color
+const SESSION_LED_MAP = [
+  Black,       // 0 = off/empty
+  BrightGreen, // 1 = playing
+  BrightRed,   // 2 = recording
+  125,         // 3 = stopped (warm yellow, palette index)
+  119,         // 4 = triggered play (dim green)
+  5,           // 5 = triggered record (dim red)
+  5,           // 6 = armed empty (dim red)
+];
+
+function updateSessionPadLEDs() {
+  for (let i = 0; i < 32; i++) {
+    const colorIdx = sessionGridColors[i] || 0;
+    const ledColor = SESSION_LED_MAP[colorIdx] || Black;
+    setLED(PAD_NOTE_START + i, ledColor);
   }
 }
 

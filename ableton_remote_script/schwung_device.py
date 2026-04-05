@@ -69,16 +69,31 @@ CMD_TRACK_LIST_REQUEST = 0x23   # Move -> Live: vel = offset + 1
 CMD_TRACK_SELECT = 0x24         # Move -> Live: vel = track_index + 1
 CMD_TRACK_LIST_RESPONSE = 0x12  # SysEx: Live -> Move
 
-# Note mode commands
-CMD_NOTE_MODE = 0x21        # Move -> Live: vel = 1+1 (on) or 0+1 (off)
+# Pad mode commands
+CMD_PAD_MODE = 0x21         # Move -> Live: vel = mode+1 (0=off, 1=note, 2=session)
 CMD_OCTAVE = 0x22           # Move -> Live: vel = 1+1 (up) or 0+1 (down)
 
 # Snapshot commands
 CMD_SNAPSHOT_STORE = 0x25    # Move -> Live: capture all set param values
 CMD_SNAPSHOT_RECALL = 0x26   # Move -> Live: restore captured values
 
-# SysEx commands: Live -> Move (note layout info for pad coloring)
+# Pad mode constants
+PAD_MODE_OFF = 0
+PAD_MODE_NOTE = 1
+PAD_MODE_SESSION = 2
+
+# SysEx commands: Live -> Move (note layout / session info)
 CMD_NOTE_LAYOUT_INFO = 0x11  # root_note, is_in_key, interval, scale_notes...
+CMD_SESSION_GRID_COLORS = 0x12  # 32 bytes, one color index per pad
+
+# Session grid color indices (sent to Move for LED mapping)
+SCLR_OFF = 0
+SCLR_PLAYING = 1
+SCLR_RECORDING = 2
+SCLR_STOPPED = 3
+SCLR_TRIGGERED_PLAY = 4
+SCLR_TRIGGERED_RECORD = 5
+SCLR_ARMED_EMPTY = 6
 
 # Persistence
 if sys.platform == 'darwin':
@@ -104,7 +119,7 @@ class SchwungDeviceControl(ControlSurface):
 
     def __init__(self, *a, **k):
         # Init attributes BEFORE super().__init__() because setup() runs inside it
-        self._note_mode = False
+        self._pad_mode = PAD_MODE_NOTE
         self._learn_mode = False
         self._device_list = []
         self._device_index = 0
@@ -151,7 +166,7 @@ class SchwungDeviceControl(ControlSurface):
 
     def setup(self):
         super().setup()
-        self._set_note_mode(True)
+        self._set_pad_mode(PAD_MODE_NOTE)
 
     def disconnect(self):
         self.log_message('SchwungDeviceControl: disconnect() called')
@@ -169,24 +184,30 @@ class SchwungDeviceControl(ControlSurface):
         return device
 
     # =========================================================================
-    # Note mode
+    # Pad mode (off / note / session)
     # =========================================================================
 
-    def _set_note_mode(self, enabled):
-        self._note_mode = enabled
-        self.log_message('SchwungDeviceControl: note mode {}'.format('ON' if enabled else 'OFF'))
+    def _set_pad_mode(self, mode):
+        self._pad_mode = mode
+        mode_names = {PAD_MODE_OFF: 'OFF', PAD_MODE_NOTE: 'NOTE', PAD_MODE_SESSION: 'SESSION'}
+        self.log_message('SchwungDeviceControl: pad mode {}'.format(mode_names.get(mode, mode)))
         try:
-            if enabled:
+            if mode == PAD_MODE_NOTE:
                 self.set_can_auto_arm(True)
                 self.set_can_update_controlled_track(True)
                 self.component_map['Note_Modes'].selected_mode = 'keyboard'
                 self._send_note_layout_info()
+            elif mode == PAD_MODE_SESSION:
+                self.set_can_auto_arm(False)
+                self.set_can_update_controlled_track(False)
+                self.component_map['Note_Modes'].selected_mode = 'session'
+                self._send_session_grid_colors()
             else:
                 self.component_map['Note_Modes'].selected_mode = None
                 self.set_can_auto_arm(False)
                 self.set_can_update_controlled_track(False)
         except Exception as e:
-            self.log_message('SchwungDeviceControl: note mode error: {}'.format(e))
+            self.log_message('SchwungDeviceControl: pad mode error: {}'.format(e))
 
     def _handle_octave(self, direction):
         try:
@@ -212,6 +233,48 @@ class SchwungDeviceControl(ControlSurface):
             self._send_sysex(CMD_NOTE_LAYOUT_INFO, data)
         except Exception as e:
             self.log_message('SchwungDeviceControl: send note layout error: {}'.format(e))
+
+    def _send_session_grid_colors(self):
+        """Send clip slot colors for the 4x8 session grid to Move."""
+        if not self._connected:
+            return
+        try:
+            colors = []
+            tracks = self.song.tracks
+            scenes = self.song.scenes
+            # Grid: 8 columns (tracks) x 4 rows (scenes)
+            # Pad layout: row 0 = bottom (notes 68-75), row 3 = top (notes 92-99)
+            # But elements use flip_rows=True, so matrix row 0 = top physical row = scene 0
+            for row in range(4):
+                scene_idx = row
+                for col in range(8):
+                    track_idx = col
+                    if track_idx < len(tracks) and scene_idx < len(scenes):
+                        track = tracks[track_idx]
+                        if not track.has_midi_input and not track.has_audio_input:
+                            colors.append(SCLR_OFF)
+                            continue
+                        slot = track.clip_slots[scene_idx]
+                        if slot.has_clip:
+                            clip = slot.clip
+                            if clip.is_playing:
+                                colors.append(SCLR_PLAYING)
+                            elif clip.is_recording:
+                                colors.append(SCLR_RECORDING)
+                            elif clip.is_triggered:
+                                colors.append(SCLR_TRIGGERED_PLAY)
+                            else:
+                                colors.append(SCLR_STOPPED)
+                        else:
+                            if track.arm:
+                                colors.append(SCLR_ARMED_EMPTY)
+                            else:
+                                colors.append(SCLR_OFF)
+                    else:
+                        colors.append(SCLR_OFF)
+            self._send_sysex(CMD_SESSION_GRID_COLORS, colors)
+        except Exception as e:
+            self.log_message('SchwungDeviceControl: session grid colors error: {}'.format(e))
 
     # =========================================================================
     # Listeners setup
@@ -317,7 +380,7 @@ class SchwungDeviceControl(ControlSurface):
                       CMD_REQUEST_STATE, CMD_UNMAP_KNOB, CMD_NAV_DEVICE,
                       CMD_PAGE_CHANGE, CMD_REQUEST_VALUE_STRING, CMD_PAGE_SEQUENTIAL,
                       CMD_RESET_PARAM, CMD_DEVICE_LIST_REQUEST, CMD_DEVICE_SELECT,
-                      CMD_FAV_ADD, CMD_SET_ADD, CMD_NOTE_MODE, CMD_OCTAVE,
+                      CMD_FAV_ADD, CMD_SET_ADD, CMD_PAD_MODE, CMD_OCTAVE,
                       CMD_TRACK_LIST_REQUEST, CMD_TRACK_SELECT,
                       CMD_SNAPSHOT_STORE, CMD_SNAPSHOT_RECALL]:
             Live.MidiMap.forward_midi_note(self._c_instance.handle(), midi_map_handle, MIDI_CHANNEL, note)
@@ -409,8 +472,8 @@ class SchwungDeviceControl(ControlSurface):
             set_index = v >> 4
             knob_idx = v & 0x0F
             self._handle_set_add(set_index, knob_idx)
-        elif note == CMD_NOTE_MODE:
-            self._set_note_mode(v > 0)
+        elif note == CMD_PAD_MODE:
+            self._set_pad_mode(v)
         elif note == CMD_OCTAVE:
             self._handle_octave(v)
         elif note == CMD_TRACK_LIST_REQUEST:
@@ -1630,7 +1693,7 @@ class SchwungDeviceControl(ControlSurface):
     def _on_hello(self):
         self.log_message('SchwungDeviceControl: HELLO received from Move module')
         self._connected = True
-        self._set_note_mode(True)
+        self._set_pad_mode(PAD_MODE_NOTE)
         self._send_note(CMD_HEARTBEAT)
         self._on_device_changed()
 
@@ -1645,7 +1708,7 @@ class SchwungDeviceControl(ControlSurface):
         self._device_page_memory = {}
         self._current_page = 0
         self._current_slot = 0
-        self._set_note_mode(True)
+        self._set_pad_mode(PAD_MODE_NOTE)
         self._on_device_changed()
 
     def _schedule_heartbeat(self):
@@ -1658,6 +1721,9 @@ class SchwungDeviceControl(ControlSurface):
         self._check_set_bindings_file()
         if self._check_set_file_changed() and self._connected:
             self._send_full_state()
+        # Refresh session grid colors periodically when in session mode
+        if self._pad_mode == PAD_MODE_SESSION and self._connected:
+            self._send_session_grid_colors()
         self._schedule_heartbeat()
 
     def _check_bindings_file(self):

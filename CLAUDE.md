@@ -35,8 +35,8 @@ Two channels on "Ableton Move (Standalone Port)":
 - **Note On (0x90)** — command protocol. Note number = command ID, velocity = value (+1 offset to avoid zero). Used for heartbeat, learn mode, device nav, page changes, note mode toggle, octave, etc.
 - **SysEx (`F0 00 7D 01`)** — variable-length data (device/param names, page info, value strings, device lists, note layout info). Ableton→Move only.
 
-### Channel 1 (pad/note mode)
-- **Note On/Off (68-99)** — pad press/release forwarded from Move to Ableton's PlayableComponent. Only sent when note mode is active. The framework translates these to scale-aware notes and routes them to the armed track.
+### Channel 1 (pad mode: note or session)
+- **Note On/Off (68-99)** — pad press/release forwarded from Move to Ableton. In note mode, routed to PlayableComponent (scale-aware notes to armed track). In session mode, routed to SessionComponent (clip launch/stop).
 
 Tick rate on Move is ~240fps (not 44 or 60), affects all timing constants.
 
@@ -45,30 +45,40 @@ Tick rate on Move is ~240fps (not 44 or 60), affects all timing constants.
 - `src/module.json` — Overtake module metadata
 - `src/ui.js` — Move-side JS: display, input handling, note mode, LED control
 - `ableton_remote_script/__init__.py` — v3 entry point, Specification, capabilities
-- `ableton_remote_script/schwung_device.py` — ControlSurface: device control, bindings, note mode
+- `ableton_remote_script/schwung_device.py` — ControlSurface: device control, bindings, pad modes
 - `ableton_remote_script/elements.py` — v3 ElementsBase: 4x8 pad matrix (notes 68-99, ch1)
 - `ableton_remote_script/keyboard.py` — InstrumentComponent + NoteLayout (scale-aware grid)
 - `ableton_remote_script/melodic_pattern.py` — MelodicPattern, Scale, NoteInfo (ported from Move)
-- `ableton_remote_script/mappings.py` — v3 create_mappings (Note_Modes → Instrument)
+- `ableton_remote_script/mappings.py` — v3 create_mappings (Note_Modes → Instrument/Session)
 - `ableton_remote_script/skin.py` — Skin for pad colors
 - `ableton_remote_script/colors.py` — RGB color constants
 - `scripts/build.sh` — Package module tarball
 - `scripts/install.sh` — Deploy to Move via SSH
 
-## Note Mode
+## Pad Modes
 
-Press **Up arrow** to toggle note mode. When active:
+Press **Up arrow** to cycle pad modes: **off → note → session → off**.
+
+All device control (knobs, pages, learn) continues working in all pad modes.
+
+### Note Mode (padMode=1)
 - Pads (4x8 grid) play scale-aware notes via Ableton's PlayableComponent
 - **Shift+Up** = octave up, **Shift+Down** = octave down
 - Pad LEDs show scale coloring (green=root, grey=in-scale, off=out)
-- Ableton sends `CMD_NOTE_LAYOUT_INFO` SysEx with root/scale for Move-side coloring
 - Notes route to the auto-armed track in Live
-- All device control (knobs, pages, learn) continues working alongside note mode
 
-### Note Mode Commands
-- `CMD_NOTE_MODE (0x21)`: Move→Live, vel=1+1 on, vel=0+1 off
-- `CMD_OCTAVE (0x22)`: Move→Live, vel=1+1 up, vel=0+1 down
+### Session Mode (padMode=2)
+- Pads launch/stop clips in an 8-track x 4-scene grid via SessionComponent
+- Pad LEDs show clip state (green=playing, red=recording, yellow=stopped, off=empty)
+- Ableton sends `CMD_SESSION_GRID_COLORS` SysEx with color indices per pad
+- Auto-arm is disabled (clip launching shouldn't change armed track)
+- Session ring (8x4) is visible in Live's session view
+
+### Pad Mode Commands
+- `CMD_PAD_MODE (0x21)`: Move→Live, vel=mode+1 (0=off, 1=note, 2=session)
+- `CMD_OCTAVE (0x22)`: Move→Live, vel=1+1 up, vel=0+1 down (note mode only)
 - `CMD_NOTE_LAYOUT_INFO (SysEx 0x11)`: Live→Move, root_note + is_in_key + interval + scale_notes
+- `CMD_SESSION_GRID_COLORS (SysEx 0x12)`: Live→Move, 32 color index bytes
 
 ## Data Model
 
@@ -127,7 +137,7 @@ When the condition parameter changes, bindings re-apply automatically.
 - `_active_params[0..7]`: live parameter objects bound to each knob
 - `_active_listeners[0..7]`: value change listeners for Live→Move sync
 - `_learn_mode`: whether learn mode is active
-- `_note_mode`: whether note mode is active (pads play notes)
+- `_pad_mode`: current pad mode (0=off, 1=note, 2=session)
 - `_slot_page_memory`: last-visited page per slot per device (runtime only, not persisted)
 - `_device_page_memory`: last page/slot per device hash, restored on device re-selection (runtime only)
 - `_bindings`: the full bindings dict, loaded from/saved to bindings.json
@@ -139,17 +149,18 @@ When the condition parameter changes, bindings re-apply automatically.
 - `paramNames[0..7]` / `paramValues[0..7]`: current knob labels and values
 - `touchStack`: ordered list of currently touched knobs (for multi-touch)
 - `connected` / `heartbeatTimer`: connection state (720-tick timeout)
-- `noteMode`: whether note mode is active
+- `padMode`: current pad mode (0=off, 1=note, 2=session)
 - `noteLayoutRoot` / `noteLayoutScaleNotes`: scale info from Ableton for pad coloring
+- `sessionGridColors[0..31]`: clip state color indices from Ableton
 
 ## Input Mapping (Move side)
 
 - **Knobs (CC 71-78, ch16):** parameter control with acceleration + discrete step handling
 - **Knob touch (notes 0-7):** select knob for learn mode, show value overlay
 - **Step buttons (notes 16-23):** switch slot, always sends CMD_PAGE_CHANGE to Ableton
-- **Pads (notes 68-99):** in note mode, forwarded as Note On/Off on channel 1 to PlayableComponent
+- **Pads (notes 68-99):** in note/session mode, forwarded as Note On/Off on channel 1 (note→PlayableComponent, session→SessionComponent)
 - **Menu (CC 118):** toggle learn mode on Move side (also sends CMD_LEARN_START/STOP)
-- **Up arrow:** toggle note mode (CMD_NOTE_MODE)
+- **Up arrow:** cycle pad mode off→note→session→off (CMD_PAD_MODE)
 - **Shift+Up/Down:** octave up/down (CMD_OCTAVE, note mode only)
 - **Main wheel (CC 14):** sequential page/subpage navigation (wraps around)
 - **Left/Right (CC 119-120):** device navigation

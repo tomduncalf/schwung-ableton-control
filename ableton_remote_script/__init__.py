@@ -26,8 +26,8 @@ class Specification(ControlSurfaceSpecification):
     create_mappings_function = create_mappings
     feedback_channels = NOTE_MODE_FEEDBACK_CHANNELS
     include_auto_arming = True
-    num_tracks = 0
-    num_scenes = 0
+    num_tracks = 8
+    num_scenes = 4
     component_map = {
         'Instrument': InstrumentComponent,
     }
