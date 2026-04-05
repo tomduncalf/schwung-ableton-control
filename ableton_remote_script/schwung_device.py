@@ -281,7 +281,8 @@ class SchwungDeviceControl(ControlSurface):
                                 colors.append(SCLR_OFF)
                     else:
                         colors.append(SCLR_OFF)
-            self._send_sysex(CMD_SESSION_GRID_COLORS, colors)
+            # Offset by +1 to avoid 0x00 bytes in SysEx transport
+            self._send_sysex(CMD_SESSION_GRID_COLORS, [c + 1 for c in colors])
         except Exception as e:
             self.log_message('SchwungDeviceControl: session grid colors error: {}'.format(e))
 

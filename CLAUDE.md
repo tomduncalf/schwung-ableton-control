@@ -40,6 +40,8 @@ Two channels on "Ableton Move (Standalone Port)":
 
 Tick rate on Move is ~240fps (not 44 or 60), affects all timing constants.
 
+**SysEx 0x00 bytes are unsafe.** USB-MIDI SysEx transport strips or truncates `0x00` bytes in payloads. All SysEx data values must be offset by +1 on send and -1 on receive to avoid zeros. This applies to Note On velocity too (already done). If adding new SysEx commands with numeric payloads, always apply the +1 offset.
+
 ## Key Files
 
 - `src/module.json` — Overtake module metadata

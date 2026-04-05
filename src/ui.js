@@ -672,9 +672,10 @@ function handleSysEx(msg) {
       break;
 
     case CMD_SESSION_GRID_COLORS:
-      // [color0, color1, ..., color31] — one per pad
+      // [color0, color1, ..., color31] — one per pad, offset +1 for SysEx safety
+      console.log(`[DC] session grid colors received: len=${payload.length} data=[${Array.from(payload.slice(0, 32)).join(',')}]`);
       for (let i = 0; i < Math.min(32, payload.length); i++) {
-        sessionGridColors[i] = payload[i];
+        sessionGridColors[i] = Math.max(0, payload[i] - 1);
       }
       if (padMode === PAD_MODE_SESSION) {
         updateSessionPadLEDs();
@@ -1676,14 +1677,20 @@ function updateSessionPadLEDs() {
   // Colors arrive as row 0 (scene 0) first, 8 per row.
   // Physical pads: note 68-75 = bottom row, 92-99 = top row.
   // Scene 0 should display on the top row, so flip vertically.
+  const colorNames = ['off', 'playing', 'recording', 'stopped', 'trig_play', 'trig_rec', 'armed_empty'];
   for (let i = 0; i < 32; i++) {
     const row = Math.floor(i / 8);
     const col = i % 8;
     const flippedRow = 3 - row;
     const colorIdx = sessionGridColors[i] || 0;
     const ledColor = SESSION_LED_MAP[colorIdx] || Black;
-    setLED(PAD_NOTE_START + flippedRow * 8 + col, ledColor);
+    const padNote = PAD_NOTE_START + flippedRow * 8 + col;
+    if (colorIdx !== 0) {
+      console.log(`[DC] session LED: grid[${row},${col}] colorIdx=${colorIdx}(${colorNames[colorIdx] || '?'}) -> pad note ${padNote} (row ${flippedRow}) ledColor=${ledColor}`);
+    }
+    setLED(padNote, ledColor);
   }
+  console.log(`[DC] session LEDs updated, ${sessionGridColors.filter(c => c !== 0).length} active pads`);
 }
 
 function buildLedList() {
