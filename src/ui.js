@@ -93,6 +93,7 @@ const CMD_SET_ADD = 0x1f;              // vel = set_index * 16 + knob_idx + 1
 
 // Timing
 const HEARTBEAT_TIMEOUT_TICKS = 720; // ~3 seconds at ~240fps (tick rate is faster than expected)
+const RECONNECT_INTERVAL_TICKS = 480; // ~2 seconds between HELLO retries when disconnected
 const LEDS_PER_FRAME = 8;
 
 /* ============================================================================
@@ -101,6 +102,7 @@ const LEDS_PER_FRAME = 8;
 
 let connected = false;
 let heartbeatTimer = 0;
+let reconnectTimer = 0;
 let learnMode = false;
 let shiftHeld = false;
 let deleteHeld = false;
@@ -167,6 +169,36 @@ let deviceBrowseNames = new Array(8).fill(""); // names for current page of 8
 // Progressive LED init
 let ledInitPending = true;
 let ledInitIndex = 0;
+
+function resetUIState() {
+  deviceName = "";
+  deviceIndex = 0;
+  deviceCount = 0;
+  paramNames = new Array(8).fill("");
+  paramValues = new Array(8).fill(0);
+  paramSteps = new Array(8).fill(0);
+  paramAccum = new Array(8).fill(0);
+  currentPage = 0;
+  pageCount = 1;
+  pageNames = ["1", "2", "3", "4", "5", "6", "7", "8"];
+  slotSubpageCounts = new Array(8).fill(1);
+  slotActiveSubpage = new Array(8).fill(0);
+  favState = 0;
+  favSubCount = 0;
+  favActiveSub = 0;
+  setState = 0;
+  setSubCount = 0;
+  setActiveSub = 0;
+  learnMode = false;
+  overlayKnob = -1;
+  overlayValueStr = "";
+  overlayTimer = 0;
+  deviceBrowseMode = false;
+  touchStack = [];
+  touchedKnob = -1;
+  marqueeOffset = 0;
+  marqueeKnob = -1;
+}
 
 /* ============================================================================
  * USB-MIDI SysEx Framing
@@ -303,10 +335,18 @@ function handleSysEx(msg) {
   const payload = msg.slice(5, -1); // strip F7
 
   switch (cmd) {
-    case CMD_DEVICE_INFO:
+    case CMD_DEVICE_INFO: {
       deviceName = decodeString(payload);
+      // Find null terminator, count and index follow
+      const nullIdx = payload.indexOf(0);
+      if (nullIdx >= 0 && nullIdx + 2 < payload.length) {
+        deviceCount = payload[nullIdx + 1];
+        deviceIndex = payload[nullIdx + 2];
+      }
+      updateNavLEDs();
       needsRedraw = true;
       break;
+    }
 
     case CMD_PARAM_INFO:
       if (payload.length >= 2) {
@@ -412,22 +452,20 @@ function handleNoteFromAbleton(note, vel) {
   switch (note) {
     case CMD_HEARTBEAT:
       console.log("[DC] heartbeat received!");
-      connected = true;
+      if (!connected) {
+        // Reconnecting — reset stale state and send HELLO so Ableton pushes fresh state
+        resetUIState();
+        connected = true;
+        updateStepLEDs();
+        updateNavLEDs();
+        sendNote(CMD_HELLO, 1);
+        console.log("[DC] reconnected, sent HELLO");
+      }
       heartbeatTimer = 0;
       needsRedraw = true;
       break;
 
-    case CMD_DEVICE_COUNT:
-      deviceCount = vel;
-      updateNavLEDs();
-      needsRedraw = true;
-      break;
-
-    case CMD_DEVICE_INDEX:
-      deviceIndex = vel;
-      updateNavLEDs();
-      needsRedraw = true;
-      break;
+    // CMD_DEVICE_COUNT and CMD_DEVICE_INDEX now packed into CMD_DEVICE_INFO sysex
 
     case CMD_FAV_ADD_ACK:
     case CMD_SET_ADD_ACK: {
@@ -1299,7 +1337,17 @@ function tick() {
   heartbeatTimer++;
   if (heartbeatTimer > HEARTBEAT_TIMEOUT_TICKS && connected) {
     connected = false;
+    reconnectTimer = 0;
     needsRedraw = true;
+  }
+
+  // Re-send HELLO periodically when disconnected so a new remote script instance can pick us up
+  if (!connected) {
+    reconnectTimer++;
+    if (reconnectTimer >= RECONNECT_INTERVAL_TICKS) {
+      reconnectTimer = 0;
+      sendNote(CMD_HELLO, 1);
+    }
   }
 
   // Fav feedback countdown

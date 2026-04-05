@@ -98,6 +98,7 @@ class SchwungDeviceControl(ControlSurface):
         self._device_page_memory = {}  # {device_hash: (page_index, slot_index)}
         self._heartbeat_counter = 0
         self._connected = False
+        self._pending_reinit = False
         self._selected_device = None
         self._track_device_listener_installed = False
 
@@ -114,6 +115,7 @@ class SchwungDeviceControl(ControlSurface):
         self._schedule_heartbeat()
 
     def disconnect(self):
+        self.log_message('SchwungDeviceControl: disconnect() called')
         self._remove_all_param_listeners()
         self._remove_device_listeners()
         ControlSurface.disconnect(self)
@@ -155,6 +157,8 @@ class SchwungDeviceControl(ControlSurface):
             self._device_page_memory[prev_hash] = (self._current_page, self._current_slot)
 
         device = self._get_selected_device()
+        self.log_message('SchwungDeviceControl: _on_device_changed device={} connected={}'.format(
+            device.name if device else 'None', self._connected))
         self._selected_device = device
         if device is not None:
             self._device_list = self._get_device_list()
@@ -208,6 +212,7 @@ class SchwungDeviceControl(ControlSurface):
     # =========================================================================
 
     def build_midi_map(self, midi_map_handle):
+        self.log_message('SchwungDeviceControl: build_midi_map() called')
         # Forward all note commands from Move (ch16)
         for note in [CMD_HELLO, CMD_LEARN_START, CMD_LEARN_STOP, CMD_LEARN_KNOB,
                       CMD_REQUEST_STATE, CMD_UNMAP_KNOB, CMD_NAV_DEVICE,
@@ -218,6 +223,11 @@ class SchwungDeviceControl(ControlSurface):
         # Forward knob value CCs 0-7 (ch16)
         for cc in KNOB_VALUE_CCS:
             Live.MidiMap.forward_midi_cc(self._c_instance.handle(), midi_map_handle, MIDI_CHANNEL, cc)
+        # MIDI is now ready — schedule a single debounced state push
+        # (build_midi_map is called multiple times during init; we only need one push)
+        self._send_note(CMD_HEARTBEAT)
+        self._pending_reinit = True
+        self.schedule_message(1, self._deferred_reinit)
 
     # =========================================================================
     # MIDI receive
@@ -1296,18 +1306,21 @@ class SchwungDeviceControl(ControlSurface):
 
     def _send_full_state(self):
         device = self._selected_device
+        self.log_message('SchwungDeviceControl: _send_full_state device={} page={} slot={} params={}'.format(
+            device.name if device else 'None', self._current_page, self._current_slot,
+            [p.name if p else '-' for p in self._active_params]))
         if device is None:
-            self._send_sysex(CMD_DEVICE_INFO, self._encode_string('No Device', MAX_PARAM_NAME_LEN) + [0])
+            self._send_sysex(CMD_DEVICE_INFO, self._encode_string('No Device', MAX_PARAM_NAME_LEN) + [0, 0, 0])
+            sleep(SYSEX_DELAY)
+            self._send_sysex(CMD_PAGE_INFO, [0, 1, 1, 1, 1, 1, 1, 1])
+            sleep(SYSEX_DELAY)
+            for i in range(8):
+                self._send_sysex(CMD_PARAM_INFO, [i, 0])  # index + null terminator (empty name)
+                sleep(SYSEX_DELAY)
             return
 
-        # Device info
-        self._send_sysex(CMD_DEVICE_INFO, self._encode_string(device.name, 20) + [0])
-        sleep(SYSEX_DELAY)
-
-        # Device count and index
-        self._send_note(CMD_DEVICE_COUNT, min(127, len(self._device_list)))
-        sleep(SYSEX_DELAY)
-        self._send_note(CMD_DEVICE_INDEX, min(127, self._device_index))
+        # Device info: name + null + count + index
+        self._send_sysex(CMD_DEVICE_INFO, self._encode_string(device.name, 20) + [0, min(127, len(self._device_list)), min(127, self._device_index)])
         sleep(SYSEX_DELAY)
 
         # Page info (slot-based)
@@ -1443,15 +1456,27 @@ class SchwungDeviceControl(ControlSurface):
         self.log_message('SchwungDeviceControl: HELLO received from Move module')
         self._connected = True
         self._send_note(CMD_HEARTBEAT)
-        # Trigger device detection and full state push
+        self._on_device_changed()
+
+    def _deferred_reinit(self):
+        """Called once after build_midi_map settles. Resets connection state and pushes fresh state to Move."""
+        if not self._pending_reinit:
+            return
+        self._pending_reinit = False
+        self.log_message('SchwungDeviceControl: deferred reinit — pushing full state')
+        self._connected = True
+        self._slot_page_memory = {}
+        self._device_page_memory = {}
+        self._current_page = 0
+        self._current_slot = 0
         self._on_device_changed()
 
     def _schedule_heartbeat(self):
         self.schedule_message(HEARTBEAT_TICKS, self._heartbeat_tick)
 
     def _heartbeat_tick(self):
-        if self._connected:
-            self._send_note(CMD_HEARTBEAT)
+        # Always send heartbeat so Move knows Ableton is alive, even before HELLO handshake
+        self._send_note(CMD_HEARTBEAT)
         self._check_bindings_file()
         self._check_set_bindings_file()
         if self._check_set_file_changed() and self._connected:
