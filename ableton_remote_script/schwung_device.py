@@ -205,8 +205,8 @@ class SchwungDeviceControl(ControlSurface):
             elif mode == PAD_MODE_SESSION:
                 self.set_can_auto_arm(False)
                 self.set_can_update_controlled_track(False)
-                if note_modes.selected_mode != 'session':
-                    note_modes.selected_mode = 'session'
+                if note_modes.selected_mode is not None:
+                    note_modes.selected_mode = None
                 self._install_session_listeners()
                 self._send_session_grid_colors()
             else:
@@ -284,6 +284,28 @@ class SchwungDeviceControl(ControlSurface):
             self._send_sysex(CMD_SESSION_GRID_COLORS, colors)
         except Exception as e:
             self.log_message('SchwungDeviceControl: session grid colors error: {}'.format(e))
+
+    def _handle_session_pad(self, note):
+        """Launch or stop clip at the pad's grid position."""
+        idx = note - 68
+        phys_row = idx // 8   # 0=bottom, 3=top
+        col = idx % 8
+        scene_idx = 3 - phys_row  # top row = scene 0
+        track_idx = col
+        try:
+            tracks = self.song.tracks
+            scenes = self.song.scenes
+            if track_idx < len(tracks) and scene_idx < len(scenes):
+                slot = tracks[track_idx].clip_slots[scene_idx]
+                if slot.has_clip:
+                    if slot.clip.is_playing:
+                        slot.clip.stop()
+                    else:
+                        slot.clip.fire()
+                elif tracks[track_idx].arm:
+                    slot.fire()  # record into empty armed slot
+        except Exception as e:
+            self.log_message('SchwungDeviceControl: session pad error: {}'.format(e))
 
     def _install_session_listeners(self):
         """Add listeners on clip slots in the 8x4 grid for real-time color updates."""
@@ -474,6 +496,16 @@ class SchwungDeviceControl(ControlSurface):
                     if cc in KNOB_VALUE_CCS:
                         self._handle_knob_value(cc, value)
                         return
+
+        # Session mode: handle pad notes for clip launch/stop
+        if self._pad_mode == PAD_MODE_SESSION and len(midi_bytes) >= 3:
+            status = midi_bytes[0] & 0xF0
+            channel = midi_bytes[0] & 0x0F
+            note = midi_bytes[1]
+            vel = midi_bytes[2]
+            if channel == 0 and 68 <= note <= 99 and status == 0x90 and vel > 0:
+                self._handle_session_pad(note)
+                return
 
         # Pass through everything else (pad notes, etc.)
         super().process_midi_bytes(midi_bytes, midi_processor)

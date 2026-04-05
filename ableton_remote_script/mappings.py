@@ -12,9 +12,5 @@ def create_mappings(control_surface):
             component='Instrument',
             matrix='pads',
         ),
-        session=dict(
-            component='Session',
-            clip_launch_buttons='pads',
-        ),
     )
     return mappings
