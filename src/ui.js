@@ -35,6 +35,7 @@ import {
   MoveSample,
   MoveRow1,
   MoveRow2,
+  MoveRow3,
   MoveRow4,
   White,
   Black,
@@ -104,7 +105,7 @@ const CMD_OCTAVE = 0x22;               // vel = 1+1 (up) or 0+1 (down)
 const CMD_SNAPSHOT_STORE = 0x25;       // capture all set param values
 const CMD_SNAPSHOT_RECALL = 0x26;      // restore captured values
 const CMD_NOTE_LAYOUT_INFO = 0x11;     // SysEx: root_note, is_in_key, interval, scale_notes...
-const CMD_SESSION_GRID_COLORS = 0x12;  // SysEx: 32 bytes, one color per pad
+const CMD_SESSION_GRID_COLORS = 0x13;  // SysEx: 32 bytes, one color per pad
 
 // Pad mode constants
 const PAD_MODE_OFF = 0;

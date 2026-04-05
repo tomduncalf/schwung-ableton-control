@@ -84,7 +84,7 @@ PAD_MODE_SESSION = 2
 
 # SysEx commands: Live -> Move (note layout / session info)
 CMD_NOTE_LAYOUT_INFO = 0x11  # root_note, is_in_key, interval, scale_notes...
-CMD_SESSION_GRID_COLORS = 0x12  # 32 bytes, one color index per pad
+CMD_SESSION_GRID_COLORS = 0x13  # 32 bytes, one color index per pad
 
 # Session grid color indices (sent to Move for LED mapping)
 SCLR_OFF = 0
