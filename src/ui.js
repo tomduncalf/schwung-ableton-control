@@ -112,7 +112,7 @@ let connected = false;
 let heartbeatTimer = 0;
 let reconnectTimer = 0;
 let learnMode = false;
-let noteMode = false;
+let noteMode = true;
 
 // Note layout info (from Ableton, for pad coloring)
 let noteLayoutRoot = 0;
@@ -205,7 +205,7 @@ function resetUIState() {
   setSubCount = 0;
   setActiveSub = 0;
   learnMode = false;
-  noteMode = false;
+  noteMode = true;
   overlayKnob = -1;
   overlayValueStr = "";
   overlayTimer = 0;
@@ -509,7 +509,9 @@ function handleNoteFromAbleton(note, vel) {
         connected = true;
         updateStepLEDs();
         updateNavLEDs();
+        updatePadLEDs();
         sendNote(CMD_HELLO, 1);
+        sendNote(CMD_NOTE_MODE, 1 + 1);
         console.log("[DC] reconnected, sent HELLO");
       }
       heartbeatTimer = 0;

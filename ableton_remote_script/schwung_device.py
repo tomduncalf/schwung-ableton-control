@@ -93,9 +93,7 @@ class SchwungDeviceControl(ControlSurface):
         logger.info(' '.join(str(m) for m in msg))
 
     def __init__(self, *a, **k):
-        super().__init__(*a, **k)
-        self.log_message('SchwungDeviceControl: initializing (v3)')
-
+        # Init attributes BEFORE super().__init__() because setup() runs inside it
         self._note_mode = False
         self._learn_mode = False
         self._device_list = []
@@ -123,6 +121,10 @@ class SchwungDeviceControl(ControlSurface):
         self._set_file_path_cache = None  # last known song file_path
 
         self._bindings_mtimes = {}  # {device_hash: mtime}
+
+        super().__init__(*a, **k)
+        self.log_message('SchwungDeviceControl: initializing (v3)')
+
         self._load_bindings()
         self._load_set_bindings()
         self._setup_listeners()
@@ -133,6 +135,10 @@ class SchwungDeviceControl(ControlSurface):
             NoteLayout(preferences=self.preferences)
         )
         return {'note_layout': const(note_layout)}
+
+    def setup(self):
+        super().setup()
+        self._set_note_mode(True)
 
     def disconnect(self):
         self.log_message('SchwungDeviceControl: disconnect() called')
@@ -1545,6 +1551,7 @@ class SchwungDeviceControl(ControlSurface):
     def _on_hello(self):
         self.log_message('SchwungDeviceControl: HELLO received from Move module')
         self._connected = True
+        self._set_note_mode(True)
         self._send_note(CMD_HEARTBEAT)
         self._on_device_changed()
 
@@ -1559,6 +1566,7 @@ class SchwungDeviceControl(ControlSurface):
         self._device_page_memory = {}
         self._current_page = 0
         self._current_slot = 0
+        self._set_note_mode(True)
         self._on_device_changed()
 
     def _schedule_heartbeat(self):
