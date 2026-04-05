@@ -83,6 +83,8 @@ All device control (knobs, pages, learn) continues working in all pad modes.
 ### Pad Mode Commands
 - `CMD_PAD_MODE (0x21)`: Move→Live, vel=mode+1 (0=off, 1=note, 2=session)
 - `CMD_OCTAVE (0x22)`: Move→Live, vel=1+1 up, vel=0+1 down (note mode only)
+
+Set pages (slot 9) are accessible even with no active device — they resolve params cross-device.
 - `CMD_NOTE_LAYOUT_INFO (SysEx 0x11)`: Live→Move, root_note + is_in_key + interval + scale_notes
 - `CMD_SESSION_GRID_COLORS (SysEx 0x12)`: Live→Move, 32 color index bytes
 
@@ -163,7 +165,9 @@ When the condition parameter changes, bindings re-apply automatically.
 
 - **Knobs (CC 71-78, ch16):** parameter control with acceleration + discrete step handling
 - **Knob touch (notes 0-7):** select knob for learn mode, show value overlay
-- **Step buttons (notes 16-23):** switch slot, always sends CMD_PAGE_CHANGE to Ableton
+- **Step buttons (notes 16-23):** switch slot (0-7), always sends CMD_PAGE_CHANGE to Ableton
+- **Fav buttons (notes 24-27):** 4 subpages on slot 8 (* 1 through * 4)
+- **Set buttons (notes 28-31):** 4 subpages on slot 9 (S 1 through S 4)
 - **Pads (notes 68-99):** in note/session mode, forwarded as Note On/Off on channel 1 (note→PlayableComponent, session→SessionComponent)
 - **Menu (CC 118):** toggle learn mode on Move side (also sends CMD_LEARN_START/STOP)
 - **Up arrow:** cycle pad mode off→note→session→off (CMD_PAD_MODE)
@@ -173,6 +177,10 @@ When the condition parameter changes, bindings re-apply automatically.
 - **Row 4 (CC 40, bottom):** device browser — short press toggles, long press momentary. Step 1-8 selects device, arrows page through 8-device groups
 - **Row 3 (CC 41):** track browser — short press toggles, long press momentary. Step 1-8 selects track, arrows page through 8-track groups
 - **Back (CC 120):** exit module
+
+## UI Feedback
+
+Use `showFeedback(text, ticks=180)` in `ui.js` to display a brief centered toast message (bordered box, ~0.75s at 240fps). Use it for user-initiated actions that need confirmation — mode changes, saves, adds, errors, etc. It sets `needsRedraw` automatically.
 
 ## Device Browser Mode
 

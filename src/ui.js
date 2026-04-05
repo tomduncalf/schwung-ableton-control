@@ -92,8 +92,7 @@ const CMD_PAGE_SEQUENTIAL = 0x1a;     // vel = direction + 1
 const CMD_RESET_PARAM = 0x1b;         // vel = knob_idx + 1
 const CMD_DEVICE_LIST_REQUEST = 0x1c;  // vel = offset + 1
 const CMD_DEVICE_SELECT = 0x1d;        // vel = device_index + 1
-const CMD_FAV_ADD = 0x1e;              // vel = fav_index * 16 + knob_idx + 1
-const CMD_SET_ADD = 0x1f;              // vel = set_index * 16 + knob_idx + 1
+// CMD_FAV_ADD (0x1e) and CMD_SET_ADD (0x1f) are in SPECIAL_SLOTS.addCmd
 
 // Track browser commands
 const CMD_TRACK_LIST_REQUEST = 0x23;   // vel = offset + 1
@@ -254,26 +253,26 @@ let pageNames = ["1", "2", "3", "4", "5", "6", "7", "8"];
 let slotSubpageCounts = new Array(8).fill(1);
 let slotActiveSubpage = new Array(8).fill(0);
 
-// Favourite page state (single slot 8 with subpages)
-let favState = 0;              // 0=empty, 1=has bindings, 2=active
-let favSubCount = 0;           // number of fav subpages
-let favActiveSub = 0;          // which subpage is active (0-based)
-let favHeld = -1;              // which fav button is held (-1/0/1)
-let favUsedAsModifier = false; // true if knob tapped during fav hold
-let favFeedbackTimer = 0;
-let favFeedbackText = "";
+// Special slots: fav (slot 8) and set (slot 9)
+// Indexed by SLOT_FAV=0, SLOT_SET=1
+const SLOT_FAV = 0;
+const SLOT_SET = 1;
+const SPECIAL_SLOTS = [
+  { noteBase: 24, slotPage: 8, cmdOffset: 8,  addCmd: 0x1e, label: "*" },  // fav: notes 24-27
+  { noteBase: 28, slotPage: 9, cmdOffset: 12, addCmd: 0x1f, label: "S" },  // set: notes 28-31
+];
+const NUM_SPECIAL_SUB = 4;     // subpage count for fav and set
+let specialState = [0, 0];              // 0=empty, 1=has bindings, 2=active
+let specialActiveSub = [0, 0];          // which subpage is active (0-based)
+let specialSubCount = [0, 0];           // number of subpages
+let specialHeld = [-1, -1];             // which button is held (-1 or 0-3)
+let specialUsedAsModifier = [false, false];
 
-// Set page state (per-set cross-device favourites, slot 9)
-let setState = 0;              // 0=empty, 1=has bindings, 2=active
-let setSubCount = 0;
-let setActiveSub = 0;
-let setHeld = -1;              // which set button is held (-1/0/1)
-let setUsedAsModifier = false;
+let feedbackTimer = 0;
+let feedbackText = "";
 
 // Step button notes (step 1-8 = notes 16-23)
 const STEP_NOTE_BASE = 16;
-const FAV_STEP_NOTE_BASE = 24; // step 9-10 = notes 24-25
-const SET_STEP_NOTE_BASE = 28; // step 13-14 = notes 28-29
 
 // Value overlay state
 let overlayKnob = -1; // which knob's overlay is showing (-1 = none)
@@ -345,12 +344,9 @@ function resetUIState() {
   pageNames = ["1", "2", "3", "4", "5", "6", "7", "8"];
   slotSubpageCounts = new Array(8).fill(1);
   slotActiveSubpage = new Array(8).fill(0);
-  favState = 0;
-  favSubCount = 0;
-  favActiveSub = 0;
-  setState = 0;
-  setSubCount = 0;
-  setActiveSub = 0;
+  specialState = [0, 0];
+  specialSubCount = [0, 0];
+  specialActiveSub = [0, 0];
   learnMode = false;
   padMode = PAD_MODE_NOTE;
   sessionGridColors = new Array(32).fill(0);
@@ -552,14 +548,14 @@ function handleSysEx(msg) {
         currentPage = payload[0];
         pageCount = payload[1];
         if (payload.length >= 5) {
-          favState = Math.max(0, payload[2] - 1);
-          favSubCount = Math.max(0, payload[3] - 1);
-          favActiveSub = Math.max(0, payload[4] - 1);
+          specialState[SLOT_FAV] = Math.max(0, payload[2] - 1);
+          specialSubCount[SLOT_FAV] = Math.max(0, payload[3] - 1);
+          specialActiveSub[SLOT_FAV] = Math.max(0, payload[4] - 1);
         }
         if (payload.length >= 8) {
-          setState = Math.max(0, payload[5] - 1);
-          setSubCount = Math.max(0, payload[6] - 1);
-          setActiveSub = Math.max(0, payload[7] - 1);
+          specialState[SLOT_SET] = Math.max(0, payload[5] - 1);
+          specialSubCount[SLOT_SET] = Math.max(0, payload[6] - 1);
+          specialActiveSub[SLOT_SET] = Math.max(0, payload[7] - 1);
         }
         updateStepLEDs();
         needsRedraw = true;
@@ -711,11 +707,9 @@ function handleNoteFromAbleton(note, vel) {
     case CMD_FAV_ADD_ACK:
     case CMD_SET_ADD_ACK: {
       const result = (vel - 1) & 0x0f;
-      if (result === 0) favFeedbackText = "Added";
-      else if (result === 1) favFeedbackText = "Full";
-      else favFeedbackText = "Empty";
-      favFeedbackTimer = 180;
-      needsRedraw = true;
+      if (result === 0) showFeedback("Added");
+      else if (result === 1) showFeedback("Full");
+      else showFeedback("Empty");
       break;
     }
   }
@@ -783,7 +777,7 @@ function handleInternalCC(cc, value) {
       updateSessionPadLEDs();
     }
     sendNote(CMD_PAD_MODE, padMode + 1);
-    needsRedraw = true;
+    showFeedback(padMode === PAD_MODE_SESSION ? "Session mode" : "Note mode");
     return;
   }
 
@@ -876,18 +870,14 @@ function handleInternalCC(cc, value) {
   // Capture button - snapshot store
   if (cc === MoveCapture && value > 63) {
     sendNote(CMD_SNAPSHOT_STORE, 1);
-    favFeedbackText = "Snapshot saved";
-    favFeedbackTimer = 180;
-    needsRedraw = true;
+    showFeedback("Snapshot saved");
     return;
   }
 
   // Sample button - snapshot recall
   if (cc === MoveSample && value > 63) {
     sendNote(CMD_SNAPSHOT_RECALL, 1);
-    favFeedbackText = "Snapshot restored";
-    favFeedbackTimer = 180;
-    needsRedraw = true;
+    showFeedback("Snapshot restored");
     return;
   }
 
@@ -1010,23 +1000,16 @@ function handleInternalNoteOn(note, velocity) {
       marqueeKnob = note;
       marqueeOffset = 0;
     }
-    // Fav held + touch = add binding to favourite page
-    if (favHeld >= 0 && connected && paramNames[note]) {
-      sendNote(CMD_FAV_ADD, favHeld * 16 + note + 1);
-      favUsedAsModifier = true;
-      overlayKnob = note;
-      overlayTimer = OVERLAY_HOLD_TICKS;
-      needsRedraw = true;
-      return;
-    }
-    // Set held + touch = add binding to set page
-    if (setHeld >= 0 && connected && paramNames[note]) {
-      sendNote(CMD_SET_ADD, setHeld * 16 + note + 1);
-      setUsedAsModifier = true;
-      overlayKnob = note;
-      overlayTimer = OVERLAY_HOLD_TICKS;
-      needsRedraw = true;
-      return;
+    // Special slot held + touch = add binding to fav/set page
+    for (let s = 0; s < SPECIAL_SLOTS.length; s++) {
+      if (specialHeld[s] >= 0 && connected && paramNames[note]) {
+        sendNote(SPECIAL_SLOTS[s].addCmd, specialHeld[s] * 16 + note + 1);
+        specialUsedAsModifier[s] = true;
+        overlayKnob = note;
+        overlayTimer = OVERLAY_HOLD_TICKS;
+        needsRedraw = true;
+        return;
+      }
     }
     // Delete held + touch = unmap knob
     if (deleteHeld && !learnMode && connected && paramNames[note]) {
@@ -1085,18 +1068,14 @@ function handleInternalNoteOn(note, velocity) {
     return;
   }
 
-  // Fav step buttons 9-10 (notes 24-25)
-  if (note >= FAV_STEP_NOTE_BASE && note < FAV_STEP_NOTE_BASE + 2) {
-    favHeld = note - FAV_STEP_NOTE_BASE;
-    favUsedAsModifier = false;
-    return;
-  }
-
-  // Set step buttons 13-14 (notes 28-29)
-  if (note >= SET_STEP_NOTE_BASE && note < SET_STEP_NOTE_BASE + 2) {
-    setHeld = note - SET_STEP_NOTE_BASE;
-    setUsedAsModifier = false;
-    return;
+  // Fav/set step buttons
+  for (let s = 0; s < SPECIAL_SLOTS.length; s++) {
+    const base = SPECIAL_SLOTS[s].noteBase;
+    if (note >= base && note < base + NUM_SPECIAL_SUB) {
+      specialHeld[s] = note - base;
+      specialUsedAsModifier[s] = false;
+      return;
+    }
   }
 }
 
@@ -1138,26 +1117,18 @@ function handleInternalNoteOff(note) {
     }
   }
 
-  // Fav step button release (notes 24-25)
-  if (note >= FAV_STEP_NOTE_BASE && note < FAV_STEP_NOTE_BASE + 2) {
-    const fi = note - FAV_STEP_NOTE_BASE;
-    if (fi === favHeld && !favUsedAsModifier) {
-      sendNote(CMD_PAGE_CHANGE, 8 + fi + 1);
+  // Fav/set step button release
+  for (let s = 0; s < SPECIAL_SLOTS.length; s++) {
+    const base = SPECIAL_SLOTS[s].noteBase;
+    if (note >= base && note < base + NUM_SPECIAL_SUB) {
+      const idx = note - base;
+      if (idx === specialHeld[s] && !specialUsedAsModifier[s]) {
+        sendNote(CMD_PAGE_CHANGE, SPECIAL_SLOTS[s].cmdOffset + idx + 1);
+      }
+      specialHeld[s] = -1;
+      specialUsedAsModifier[s] = false;
+      return;
     }
-    favHeld = -1;
-    favUsedAsModifier = false;
-    return;
-  }
-
-  // Set step button release (notes 28-29)
-  if (note >= SET_STEP_NOTE_BASE && note < SET_STEP_NOTE_BASE + 2) {
-    const si = note - SET_STEP_NOTE_BASE;
-    if (si === setHeld && !setUsedAsModifier) {
-      sendNote(CMD_PAGE_CHANGE, 10 + si + 1);
-    }
-    setHeld = -1;
-    setUsedAsModifier = false;
-    return;
   }
 }
 
@@ -1205,8 +1176,8 @@ function drawScreen() {
     drawValueOverlay();
   }
 
-  if (favFeedbackTimer > 0) {
-    drawFavFeedback();
+  if (feedbackTimer > 0) {
+    drawFeedback();
   }
 }
 
@@ -1518,41 +1489,22 @@ function drawFooter() {
   const tabGap = 1;
   let tabX = 0;
 
-  // Fav tab
-  const favLabel = `* ${favActiveSub + 1}`;
-  if (currentPage === 8) {
-    fill_rect(tabX, tabY, tabW, tabH, 1);
-    print(tabX + 1, tabY + 1, favLabel, 0);
-  } else if (favState >= 1) {
-    print(tabX + 1, tabY + 1, favLabel, 1);
-  } else {
-    print(tabX + 1, tabY + 1, favLabel, 1);
-  }
-  {
+  // Fav and set tabs
+  for (let s = 0; s < SPECIAL_SLOTS.length; s++) {
+    const sl = SPECIAL_SLOTS[s];
+    const label = `${sl.label} ${specialActiveSub[s] + 1}`;
+    if (currentPage === sl.slotPage) {
+      fill_rect(tabX, tabY, tabW, tabH, 1);
+      print(tabX + 1, tabY + 1, label, 0);
+    } else {
+      print(tabX + 1, tabY + 1, label, 1);
+    }
     const indicatorY = tabY + tabH;
-    const segW = Math.floor(tabW / 2);
-    const segX = favActiveSub * segW;
+    const segW = Math.floor(tabW / NUM_SPECIAL_SUB);
+    const segX = tabX + specialActiveSub[s] * segW;
     fill_rect(segX, indicatorY, segW, 1, 1);
+    tabX += tabW + tabGap;
   }
-  tabX += tabW + tabGap;
-
-  // Set tab
-  const setLabel = `S ${setActiveSub + 1}`;
-  if (currentPage === 9) {
-    fill_rect(tabX, tabY, tabW, tabH, 1);
-    print(tabX + 1, tabY + 1, setLabel, 0);
-  } else if (setState >= 1) {
-    print(tabX + 1, tabY + 1, setLabel, 1);
-  } else {
-    print(tabX + 1, tabY + 1, setLabel, 1);
-  }
-  {
-    const indicatorY = tabY + tabH;
-    const segW = Math.floor(tabW / 2);
-    const segX = tabX + setActiveSub * segW;
-    fill_rect(segX, indicatorY, segW, 1, 1);
-  }
-  tabX += tabW + tabGap;
 
   // Device name section: vertical line on left, horizontal line above
   const nameLeft = tabX + 4;
@@ -1562,6 +1514,15 @@ function drawFooter() {
   set_clip_rect(nameLeft + 2, tabY, SCREEN_WIDTH - nameLeft - 3, tabH);
   print(nameLeft + 3, tabY + 1, name, 1);
   clear_clip_rect();
+
+  // Pad mode indicator (bottom-right, inverted square touching line above)
+  if (padMode === PAD_MODE_NOTE || padMode === PAD_MODE_SESSION) {
+    const modeLabel = padMode === PAD_MODE_NOTE ? "N" : "S";
+    const mw = text_width(modeLabel) + 4;
+    const mh = SCREEN_HEIGHT - 53;  // from top line to bottom edge
+    fill_rect(SCREEN_WIDTH - mw, 53, mw, mh, 1);
+    print(SCREEN_WIDTH - mw + 2, tabY + 1, modeLabel, 0);
+  }
 
   // Learn mode indicator (overlays right side)
   if (learnMode) {
@@ -1577,14 +1538,20 @@ function drawFooter() {
   }
 }
 
-function drawFavFeedback() {
-  const w = text_width(favFeedbackText) + 8;
+function showFeedback(text, ticks = 180) {
+  feedbackText = text;
+  feedbackTimer = ticks;
+  needsRedraw = true;
+}
+
+function drawFeedback() {
+  const w = text_width(feedbackText) + 8;
   const h = 12;
   const x = Math.floor((SCREEN_WIDTH - w) / 2);
   const y = 24;
   fill_rect(x, y, w, h, 0);
   draw_rect(x, y, w, h, 1);
-  print(x + 4, y + 2, favFeedbackText, 1);
+  print(x + 4, y + 2, feedbackText, 1);
 }
 
 function drawValueOverlay() {
@@ -1709,27 +1676,18 @@ function buildLedList() {
     }
   }
 
-  // Fav step LEDs (step 9=*1, step 10=*2)
-  for (let fi = 0; fi < 2; fi++) {
-    const note = FAV_STEP_NOTE_BASE + fi;
-    if (currentPage === 8 && favActiveSub === fi) {
-      leds.push({ note, color: White });
-    } else if (favState >= 1) {
-      leds.push({ note, color: DarkGrey });
-    } else {
-      leds.push({ note, color: Black });
-    }
-  }
-
-  // Set step LEDs (step 13=S1, step 14=S2)
-  for (let si = 0; si < 2; si++) {
-    const note = SET_STEP_NOTE_BASE + si;
-    if (currentPage === 9 && setActiveSub === si) {
-      leds.push({ note, color: White });
-    } else if (setState >= 1) {
-      leds.push({ note, color: DarkGrey });
-    } else {
-      leds.push({ note, color: Black });
+  // Fav/set step LEDs
+  for (let s = 0; s < SPECIAL_SLOTS.length; s++) {
+    const sl = SPECIAL_SLOTS[s];
+    for (let i = 0; i < NUM_SPECIAL_SUB; i++) {
+      const note = sl.noteBase + i;
+      if (currentPage === sl.slotPage && specialActiveSub[s] === i) {
+        leds.push({ note, color: White });
+      } else if (specialState[s] >= 1) {
+        leds.push({ note, color: DarkGrey });
+      } else {
+        leds.push({ note, color: Black });
+      }
     }
   }
 
@@ -1789,17 +1747,14 @@ function updateStepLEDs() {
     else if (i < pageCount) setLED(note, DarkGrey);
     else setLED(note, Black);
   }
-  for (let fi = 0; fi < 2; fi++) {
-    const note = FAV_STEP_NOTE_BASE + fi;
-    if (currentPage === 8 && favActiveSub === fi) setLED(note, White);
-    else if (favState >= 1) setLED(note, DarkGrey);
-    else setLED(note, Black);
-  }
-  for (let si = 0; si < 2; si++) {
-    const note = SET_STEP_NOTE_BASE + si;
-    if (currentPage === 9 && setActiveSub === si) setLED(note, White);
-    else if (setState >= 1) setLED(note, DarkGrey);
-    else setLED(note, Black);
+  for (let s = 0; s < SPECIAL_SLOTS.length; s++) {
+    const sl = SPECIAL_SLOTS[s];
+    for (let i = 0; i < NUM_SPECIAL_SUB; i++) {
+      const note = sl.noteBase + i;
+      if (currentPage === sl.slotPage && specialActiveSub[s] === i) setLED(note, White);
+      else if (specialState[s] >= 1) setLED(note, DarkGrey);
+      else setLED(note, Black);
+    }
   }
 }
 
@@ -1856,10 +1811,10 @@ function tick() {
   }
 
   // Fav feedback countdown
-  if (favFeedbackTimer > 0) {
-    favFeedbackTimer--;
-    if (favFeedbackTimer === 0) {
-      favFeedbackText = "";
+  if (feedbackTimer > 0) {
+    feedbackTimer--;
+    if (feedbackTimer === 0) {
+      feedbackText = "";
       needsRedraw = true;
     }
   }

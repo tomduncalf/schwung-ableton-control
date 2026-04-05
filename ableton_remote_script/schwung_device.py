@@ -704,18 +704,16 @@ class SchwungDeviceControl(ControlSurface):
         self.song.view.selected_track = tracks[index]
 
     def _handle_page_change(self, slot_idx):
-        if slot_idx < 0 or slot_idx >= 12:
+        if slot_idx < 0 or slot_idx >= 16:
             return
-        # Slot 8/9 = jump to fav slot 8 subpage 0/1 (dedicated buttons, no cycling)
+        # Slot 8-11 = jump to fav slot 8 subpage 0-3 (dedicated buttons, no cycling)
         fav_target_sub = None
-        if slot_idx == 9:
-            fav_target_sub = 1
+        if 8 <= slot_idx <= 11:
+            fav_target_sub = slot_idx - 8
             slot_idx = 8
-        elif slot_idx == 8:
-            fav_target_sub = 0
-        # Slot 10/11 = jump to set slot 9 subpage 0/1
-        if slot_idx == 11 or slot_idx == 10:
-            target_sub = 1 if slot_idx == 11 else 0
+        # Slot 12-15 = jump to set slot 9 subpage 0-3
+        if 12 <= slot_idx <= 15:
+            target_sub = slot_idx - 12
             self._handle_set_page_change(target_sub)
             return
         device = self._get_valid_device()
@@ -730,7 +728,8 @@ class SchwungDeviceControl(ControlSurface):
             if device_hash not in self._slot_page_memory:
                 self._slot_page_memory[device_hash] = {}
             self._slot_page_memory[device_hash][current_slot] = self._current_page
-            self._current_page = -1
+            # Encode target sub for fav slots so display shows correct subpage
+            self._current_page = -(fav_target_sub + 1) if fav_target_sub is not None else -1
             self._current_slot = slot_idx
             self._apply_bindings_for_device(device)
             self._send_full_state()
@@ -744,6 +743,14 @@ class SchwungDeviceControl(ControlSurface):
         if fav_target_sub is not None and fav_target_sub < len(pages_in_slot):
             # Direct jump to a specific subpage (e.g. step 10 -> fav subpage 1)
             self._current_page = pages_in_slot[fav_target_sub]
+        elif fav_target_sub is not None and fav_target_sub >= len(pages_in_slot):
+            # Target fav subpage doesn't exist yet — navigate to empty fav slot
+            # Encode target sub as negative: -1 = sub 0, -2 = sub 1, etc.
+            self._current_page = -(fav_target_sub + 1)
+            self._current_slot = slot_idx
+            self._apply_bindings_for_device(device)
+            self._send_full_state()
+            return
         elif slot_idx == current_slot:
             # Same slot pressed again: cycle to next sub-page
             pos = -1
@@ -862,7 +869,7 @@ class SchwungDeviceControl(ControlSurface):
 
     def _handle_fav_add(self, fav_index, knob_idx):
         """Copy binding from current page's knob to a favourite page (both on slot 8)."""
-        if fav_index < 0 or fav_index > 1 or knob_idx < 0 or knob_idx >= 8:
+        if fav_index < 0 or fav_index > 3 or knob_idx < 0 or knob_idx >= 8:
             return
         device = self._get_valid_device()
         if device is None:
@@ -937,14 +944,15 @@ class SchwungDeviceControl(ControlSurface):
         if target_sub < len(set_pages):
             self._current_page = target_sub  # index into _set_bindings['pages']
         else:
-            self._current_page = -1  # empty
+            # Encode target sub as negative: -1 = sub 0, -2 = sub 1, etc.
+            self._current_page = -(target_sub + 1)
         self._current_slot = 9
         self._apply_bindings_for_device(device)
         self._send_full_state()
 
     def _handle_set_add(self, set_index, knob_idx):
         """Copy binding from current page's knob to a set page, including device reference."""
-        if set_index < 0 or set_index > 1 or knob_idx < 0 or knob_idx >= 8:
+        if set_index < 0 or set_index > 3 or knob_idx < 0 or knob_idx >= 8:
             return
         device = self._get_valid_device()
         if device is None:
@@ -1234,11 +1242,21 @@ class SchwungDeviceControl(ControlSurface):
         if 'pages' not in device_entry:
             device_entry['pages'] = []
         pages = device_entry['pages']
-        # If on empty slot (current_page == -1), create a page for this slot
+        # If on empty slot (current_page < 0), create a page for this slot
         if self._current_page < 0:
-            new_page = {'name': '{}'.format(self._current_slot + 1), 'slot': self._current_slot, 'knobs': [None] * 8}
-            pages.append(new_page)
-            self._current_page = len(pages) - 1
+            target_sub = abs(self._current_page) - 1
+            if self._current_slot == 8:
+                # Fav page: create missing subpages up to target
+                while len(self._get_pages_for_slot(device_hash, 8)) <= target_sub:
+                    idx = len(self._get_pages_for_slot(device_hash, 8))
+                    new_page = {'name': '* {}'.format(idx + 1), 'slot': 8, 'knobs': [None] * 8}
+                    pages.append(new_page)
+                fav_pages = self._get_pages_for_slot(device_hash, 8)
+                self._current_page = fav_pages[target_sub]
+            else:
+                new_page = {'name': '{}'.format(self._current_slot + 1), 'slot': self._current_slot, 'knobs': [None] * 8}
+                pages.append(new_page)
+                self._current_page = len(pages) - 1
         # Auto-create pages up to current_page
         while len(pages) <= self._current_page:
             pages.append({'name': '{}'.format(len(pages) + 1), 'slot': self._current_slot, 'knobs': [None] * 8})
@@ -1305,9 +1323,9 @@ class SchwungDeviceControl(ControlSurface):
         if 'pages' not in self._set_bindings:
             self._set_bindings['pages'] = []
         set_pages = self._set_bindings['pages']
-        # Create set page if needed
+        # Create set page if needed (negative = empty subpage, decode target index)
         if self._current_page < 0:
-            self._current_page = 0
+            self._current_page = abs(self._current_page) - 1
         while len(set_pages) <= self._current_page:
             set_pages.append({'name': 'S {}'.format(len(set_pages) + 1), 'knobs': [None] * 8})
         knobs = set_pages[self._current_page].get('knobs', [None] * 8)
@@ -1628,14 +1646,43 @@ class SchwungDeviceControl(ControlSurface):
         if device is None:
             self._send_sysex(CMD_DEVICE_INFO, self._encode_string('No Device', MAX_PARAM_NAME_LEN) + [0, 0, 0])
             sleep(SYSEX_DELAY)
-            self._send_sysex(CMD_PAGE_INFO, [0, 1, 1, 1, 1, 1, 1, 1])
+            # Set pages are accessible even with no device
+            set_pages = self._set_bindings.get('pages', [])
+            if self._current_slot == 9:
+                set_state = 2
+            elif set_pages and any(any(k is not None for k in p.get('knobs', [None] * 8)) for p in set_pages):
+                set_state = 1
+            else:
+                set_state = 0
+            set_sub_count = len(set_pages)
+            if self._current_slot == 9:
+                set_active_sub = self._current_page if self._current_page >= 0 else abs(self._current_page) - 1
+            else:
+                set_active_sub = 0
+            self._send_sysex(CMD_PAGE_INFO, [self._current_slot if self._current_slot == 9 else 0, 1,
+                                             1, 1, 1,
+                                             set_state + 1, set_sub_count + 1, set_active_sub + 1])
             sleep(SYSEX_DELAY)
             for i in range(8):
-                self._send_sysex(CMD_PARAM_INFO, [i, 0])  # index + null terminator (empty name)
+                param = self._active_params[i]
+                if param:
+                    name = self._get_set_display_name(i, param.name) if self._current_slot == 9 else ''
+                else:
+                    name = ''
+                self._send_sysex(CMD_PARAM_INFO, [i] + self._encode_string(name, MAX_PARAM_NAME_LEN) + [0])
                 sleep(SYSEX_DELAY)
-            # Zero knob values, step counts, and subpage info so Move clears stale LEDs
+            # Send knob values (set page params may be resolved cross-device)
             for i in range(8):
-                self._send_cc(i, 0)
+                param = self._active_params[i]
+                if param is None:
+                    self._send_cc(i, 0)
+                else:
+                    val_range = param.max - param.min
+                    if val_range == 0:
+                        self._send_cc(i, 0)
+                    else:
+                        v = int(127 * (param.value - param.min) / val_range)
+                        self._send_cc(i, max(0, min(127, v)))
             self._send_sysex(CMD_PARAM_STEPS, [1] * 8)
             self._send_sysex(CMD_SLOT_SUBPAGE_INFO, [2, 1])  # 1 slot, 1 subpage (offset +1)
             return
@@ -1664,6 +1711,9 @@ class SchwungDeviceControl(ControlSurface):
         fav_active_sub = 0
         if current_slot == 8 and self._current_page >= 0 and self._current_page in fav_pages:
             fav_active_sub = fav_pages.index(self._current_page)
+        elif current_slot == 8 and self._current_page < 0:
+            # Empty fav subpage: decode target sub from negative _current_page
+            fav_active_sub = abs(self._current_page) - 1
         elif current_slot != 8 and fav_pages:
             remembered = self._slot_page_memory.get(device_hash, {}).get(8)
             if remembered is not None and remembered in fav_pages:
@@ -1677,8 +1727,11 @@ class SchwungDeviceControl(ControlSurface):
         else:
             set_state = 0
         set_sub_count = len(set_pages)
-        if current_slot == 9:
-            set_active_sub = max(0, self._current_page)
+        if current_slot == 9 and self._current_page >= 0:
+            set_active_sub = self._current_page
+        elif current_slot == 9 and self._current_page < 0:
+            # Empty set subpage: decode target sub from negative _current_page
+            set_active_sub = abs(self._current_page) - 1
         else:
             remembered = self._slot_page_memory.get(device_hash, {}).get(9)
             set_active_sub = max(0, remembered) if remembered is not None else 0
