@@ -71,10 +71,14 @@ All device control (knobs, pages, learn) continues working in all pad modes.
 
 ### Session Mode (padMode=2)
 - Pads launch/stop clips in an 8-track x 4-scene grid via SessionComponent
-- Pad LEDs show clip state (green=playing, red=recording, yellow=stopped, off=empty)
-- Ableton sends `CMD_SESSION_GRID_COLORS` SysEx with color indices per pad
 - Auto-arm is disabled (clip launching shouldn't change armed track)
 - Session ring (8x4) is visible in Live's session view
+
+**Session grid rendering is custom** — it does not use the v3 framework's skin/color system. The flow:
+1. `_send_session_grid_colors()` in `schwung_device.py` iterates `song.tracks` (cols 0-7) × `song.scenes` (rows 0-3), checks each clip slot's state (playing/recording/stopped/triggered/armed-empty), and packs 32 color index bytes into a `CMD_SESSION_GRID_COLORS` SysEx message (values +1 offset for SysEx safety).
+2. `ui.js` receives the SysEx, subtracts 1 from each byte, and stores in `sessionGridColors[0..31]`.
+3. `updateSessionPadLEDs()` maps each color index through `SESSION_LED_MAP` (index→LED color) and calls `setLED()`. Rows are flipped vertically so scene 0 (data row 0) displays on the top physical pad row (notes 92-99).
+4. Listeners on `has_clip`, `playing_status`, `is_triggered`, and `arm` trigger `_send_session_grid_colors()` automatically when clip state changes.
 
 ### Pad Mode Commands
 - `CMD_PAD_MODE (0x21)`: Move→Live, vel=mode+1 (0=off, 1=note, 2=session)
