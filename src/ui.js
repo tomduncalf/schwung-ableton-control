@@ -31,6 +31,7 @@ import {
   MoveMainKnob,
   MoveMainButton,
   MoveDelete,
+  MoveRow1,
   MoveRow3,
   MoveRow4,
   White,
@@ -807,8 +808,8 @@ function handleInternalCC(cc, value) {
     return;
   }
 
-  // Menu button - toggle learn mode
-  if (cc === MoveMenu && value > 63) {
+  // Row 1 button - toggle learn mode
+  if (cc === MoveRow1 && value > 63) {
     learnMode = !learnMode;
     sendNote(learnMode ? CMD_LEARN_START : CMD_LEARN_STOP, 1);
     needsRedraw = true;
@@ -1314,7 +1315,7 @@ function drawParamsCompact() {
   // Show hint when no params are mapped on this page
   const hasAnyParam = paramNames.some((n) => n);
   if (!hasAnyParam) {
-    const msg = "Press Menu to learn";
+    const msg = "Press Row 1 to learn";
     const w = text_width(msg);
     print(Math.floor((SCREEN_WIDTH - w) / 2), 10, msg, 1);
     return;
