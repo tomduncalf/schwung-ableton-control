@@ -1087,9 +1087,11 @@ function handleInternalNoteOff(note) {
 
 function drawHelp() {
   const title = "Help";
-  const line = "T1: Learn  T3: Track  T4: Device";
-  print(Math.floor((SCREEN_WIDTH - text_width(title)) / 2), 16, title, 1);
-  print(Math.floor((SCREEN_WIDTH - text_width(line)) / 2), 32, line, 1);
+  const line1 = "T1: Learn  T3: Track";
+  const line2 = "T4: Device";
+  print(Math.floor((SCREEN_WIDTH - text_width(title)) / 2), 12, title, 1);
+  print(Math.floor((SCREEN_WIDTH - text_width(line1)) / 2), 28, line1, 1);
+  print(Math.floor((SCREEN_WIDTH - text_width(line2)) / 2), 40, line2, 1);
 }
 
 function drawScreen() {
