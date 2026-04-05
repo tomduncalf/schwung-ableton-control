@@ -103,6 +103,73 @@ const PAD_CHANNEL = 0x00;  // channel 1 for pad MIDI (separate from command ch16
 const HEARTBEAT_TIMEOUT_TICKS = 720; // ~3 seconds at ~240fps (tick rate is faster than expected)
 const RECONNECT_INTERVAL_TICKS = 480; // ~2 seconds between HELLO retries when disconnected
 const LEDS_PER_FRAME = 8;
+const HOLD_THRESHOLD_TICKS = 72; // ~300ms at ~240fps — short press vs hold
+
+/* ============================================================================
+ * HoldToggle — short press toggles, long press is momentary
+ *
+ * Usage:
+ *   const ht = new HoldToggle(onActivate, onDeactivate);
+ *   // on button press:   ht.press()
+ *   // on button release:  ht.release()
+ *   // every tick:         ht.tick()
+ *   // read state:         ht.active
+ * ============================================================================ */
+
+class HoldToggle {
+  constructor(onActivate, onDeactivate) {
+    this.active = false;
+    this._held = false;
+    this._holdTicks = 0;
+    this._wasHold = false;
+    this._onActivate = onActivate;
+    this._onDeactivate = onDeactivate;
+  }
+
+  press() {
+    this._held = true;
+    this._holdTicks = 0;
+    this._wasHold = false;
+    if (!this.active) {
+      this.active = true;
+      this._onActivate();
+    }
+  }
+
+  release() {
+    this._held = false;
+    if (this._wasHold) {
+      // long press — deactivate on release (momentary)
+      this.active = false;
+      this._onDeactivate();
+    }
+    // short press — stay toggled on, next short press will toggle off
+  }
+
+  tick() {
+    if (this._held) {
+      this._holdTicks++;
+      if (this._holdTicks >= HOLD_THRESHOLD_TICKS) {
+        this._wasHold = true;
+      }
+    }
+  }
+
+  /** Programmatically deactivate (e.g. on disconnect). */
+  deactivate() {
+    if (this.active) {
+      this.active = false;
+      this._held = false;
+      this._onDeactivate();
+    }
+  }
+
+  /** Short press while already active — toggle off. */
+  toggleOff() {
+    this.active = false;
+    this._onDeactivate();
+  }
+}
 
 /* ============================================================================
  * State
@@ -175,11 +242,27 @@ let overlayValueStr = ""; // formatted value string from Ableton
 let overlayTimer = 0; // ticks remaining before overlay auto-hides
 const OVERLAY_HOLD_TICKS = 1; // dismiss immediately on release
 
-// Device browser state (Track 4 hold modifier)
-let deviceBrowseMode = false;
+// Device browser state
 let deviceBrowseOffset = 0;  // first device index on current page
 let deviceBrowseTotal = 0;   // total device count
 let deviceBrowseNames = new Array(8).fill(""); // names for current page of 8
+
+function enterDeviceBrowse() {
+  deviceBrowseOffset = 0;
+  sendNote(CMD_DEVICE_LIST_REQUEST, 0 + 1);
+  needsRedraw = true;
+}
+
+function exitDeviceBrowse() {
+  updateStepLEDs();
+  updateKnobLEDs();
+  updateNavLEDs();
+  setButtonLED(MoveMenu, WhiteLedBright);
+  setButtonLED(MoveBack, WhiteLedBright);
+  needsRedraw = true;
+}
+
+const deviceBrowseToggle = new HoldToggle(enterDeviceBrowse, exitDeviceBrowse);
 
 // Progressive LED init
 let ledInitPending = true;
@@ -209,7 +292,7 @@ function resetUIState() {
   overlayKnob = -1;
   overlayValueStr = "";
   overlayTimer = 0;
-  deviceBrowseMode = false;
+  deviceBrowseToggle.deactivate();
   touchStack = [];
   touchedKnob = -1;
   marqueeOffset = 0;
@@ -585,27 +668,22 @@ function handleInternalCC(cc, value) {
     return;
   }
 
-  // Track 4 button (MoveRow4 = CC 40) — device browser modifier
+  // Track 4 button (MoveRow4 = CC 40) — device browser (short press = toggle, long press = momentary)
   if (cc === MoveRow4) {
-    if (value > 63 && !deviceBrowseMode) {
-      deviceBrowseMode = true;
-      deviceBrowseOffset = 0;
-      sendNote(CMD_DEVICE_LIST_REQUEST, 0 + 1);
-      needsRedraw = true;
-    } else if (value <= 63 && deviceBrowseMode) {
-      deviceBrowseMode = false;
-      updateStepLEDs();
-      updateKnobLEDs();
-      updateNavLEDs();
-      setButtonLED(MoveMenu, WhiteLedBright);
-      setButtonLED(MoveBack, WhiteLedBright);
-      needsRedraw = true;
+    if (value > 63) {
+      if (deviceBrowseToggle.active) {
+        deviceBrowseToggle.toggleOff();
+      } else {
+        deviceBrowseToggle.press();
+      }
+    } else {
+      deviceBrowseToggle.release();
     }
     return;
   }
 
   // In device browse mode, intercept arrows for paging
-  if (deviceBrowseMode) {
+  if (deviceBrowseToggle.active) {
     if (cc === MoveLeft && value > 63) {
       if (deviceBrowseOffset > 0) {
         const newOffset = Math.max(0, deviceBrowseOffset - 8);
@@ -802,7 +880,7 @@ function handleInternalNoteOn(note, velocity) {
   if (note >= STEP_NOTE_BASE && note < STEP_NOTE_BASE + 8) {
     const slotIdx = note - STEP_NOTE_BASE;
     // In device browse mode, select device
-    if (deviceBrowseMode) {
+    if (deviceBrowseToggle.active) {
       const devIdx = deviceBrowseOffset + slotIdx;
       if (devIdx < deviceBrowseTotal && deviceBrowseNames[slotIdx]) {
         sendNote(CMD_DEVICE_SELECT, devIdx + 1);
@@ -899,7 +977,7 @@ function drawScreen() {
     return;
   }
 
-  if (deviceBrowseMode) {
+  if (deviceBrowseToggle.active) {
     drawDeviceBrowser();
     return;
   }
@@ -953,7 +1031,7 @@ function drawDeviceBrowser() {
 }
 
 function updateDeviceBrowseLEDs() {
-  if (!deviceBrowseMode) return;
+  if (!deviceBrowseToggle.active) return;
   // Step LEDs: light up for available devices
   for (let i = 0; i < 8; i++) {
     const note = STEP_NOTE_BASE + i;
@@ -1457,6 +1535,9 @@ function tick() {
     setupLedBatch();
     return;
   }
+
+  // HoldToggle timers
+  deviceBrowseToggle.tick();
 
   // Heartbeat watchdog
   heartbeatTimer++;
