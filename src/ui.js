@@ -652,30 +652,20 @@ function handleInternalCC(cc, value) {
     sendNote(CMD_NAV_DEVICE, 0x01 + 1); // right = +1
     return;
   }
-  // Up arrow — toggle note mode
+  // Up arrow — octave up
   if (cc === MoveUp && value > 63) {
-    if (shiftHeld && noteMode) {
-      // Shift+Up = octave up
-      sendNote(CMD_OCTAVE, 1 + 1);
-      return;
-    }
-    noteMode = !noteMode;
-    sendNote(CMD_NOTE_MODE, (noteMode ? 1 : 0) + 1);
     if (noteMode) {
-      updatePadLEDs();
-    } else {
-      clearPadLEDs();
+      sendNote(CMD_OCTAVE, 1 + 1);
     }
-    needsRedraw = true;
     return;
   }
 
-  // Down arrow — octave down (in note mode with shift), otherwise unused
+  // Down arrow — octave down
   if (cc === MoveDown && value > 63) {
-    if (shiftHeld && noteMode) {
-      sendNote(CMD_OCTAVE, 0 + 1); // down
-      return;
+    if (noteMode) {
+      sendNote(CMD_OCTAVE, 0 + 1);
     }
+    return;
   }
 
   // Main wheel — sequential page/subpage navigation
@@ -917,12 +907,6 @@ function drawScreen() {
   drawParams();
   drawFooter();
 
-  // Note mode indicator (top-right corner)
-  if (noteMode) {
-    const label = "NOTE";
-    const lw = text_width(label);
-    print(SCREEN_WIDTH - lw - 1, 0, label, 1);
-  }
 
   if (favFeedbackTimer > 0) {
     drawFavFeedback();
