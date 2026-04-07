@@ -1,4 +1,4 @@
-# Schwung Device Control
+# Schwung Ableton Control
 
 Two-way Ableton Live device parameter control for Ableton Move, with learn mode and note-playing grid.
 

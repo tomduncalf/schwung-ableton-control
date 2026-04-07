@@ -1,6 +1,6 @@
 """
 SchwungDeviceControl - Ableton Remote Script for two-way device parameter control
-with Schwung Device Control overtake module on Ableton Move.
+with Schwung Ableton Control overtake module on Ableton Move.
 
 Communicates over MIDI cable 2 (USB-C) using CC on channel 16 for real-time values
 and SysEx with header F0 00 7D 01 for structured data.

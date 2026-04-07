@@ -2,7 +2,7 @@
 
 ## Overview
 
-Add a session mode to schwung-device-control that repurposes the 4x8 pad grid (notes 68-99) for clip launching and stopping, using the v3 framework's built-in `SessionComponent`. The user cycles between three pad modes: **off** (device control, no pads), **note** (PlayableComponent), and **session** (clip grid).
+Add a session mode to schwung-ableton-control that repurposes the 4x8 pad grid (notes 68-99) for clip launching and stopping, using the v3 framework's built-in `SessionComponent`. The user cycles between three pad modes: **off** (device control, no pads), **note** (PlayableComponent), and **session** (clip grid).
 
 The 4x8 grid maps to **8 tracks x 4 scenes**, matching Move's physical layout (8 columns, 4 rows). The v3 `SessionComponent` handles clip slot assignment, launch on press, and color feedback through the skin system.
 

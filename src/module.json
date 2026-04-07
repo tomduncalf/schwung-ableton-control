@@ -1,5 +1,5 @@
 {
-  "id": "device-control",
+  "id": "ableton-control",
   "name": "Ableton Control",
   "version": "0.1.0",
   "description": "Two-way Ableton Live device parameter control with learn mode",

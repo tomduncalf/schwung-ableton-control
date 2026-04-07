@@ -1,6 +1,6 @@
 """
 InstrumentComponent — scale-aware note grid for the 4x8 pad matrix.
-Ported from Ableton Move's instrument.py, adapted for Schwung Device Control.
+Ported from Ableton Move's instrument.py, adapted for Schwung Ableton Control.
 """
 from __future__ import absolute_import, print_function, unicode_literals
 

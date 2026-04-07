@@ -4,7 +4,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DIST_DIR="$PROJECT_DIR/dist"
-MODULE_ID="device-control"
+MODULE_ID="ableton-control"
 MOVE_HOST="${MOVE_HOST:-move.local}"
 MOVE_USER="${MOVE_USER:-ableton}"
 REMOTE_PATH="/data/UserData/schwung/modules/tools/$MODULE_ID"

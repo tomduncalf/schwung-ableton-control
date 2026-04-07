@@ -1,5 +1,5 @@
 /*
- * Schwung Device Control - Overtake Module
+ * Schwung Ableton Control - Overtake Module
  *
  * Two-way Ableton Live device parameter control with learn mode.
  * Communicates with SchwungDeviceControl Remote Script via MIDI cable 2.
