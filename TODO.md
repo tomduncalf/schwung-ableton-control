@@ -1,10 +1,9 @@
 - Scroll tracks/devices
 - Snapshot/morph?
+    - Multiple scenes (dedicated screen with multiple knobs)
 - Handle > 1 Move connected
 - Wifi?
 - Session view (Claude: session-view-framework)
-- Set param min/max
-- Multiple scenes (dedicated screen with multiple knobs)
 - Parameter locking
 - Parameter detail screen (min, max)
 - Reconsider controls (e.g. scene launch needs same buttons)
